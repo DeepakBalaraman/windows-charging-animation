@@ -408,6 +408,7 @@ const GUID DECLSPEC_SELECTANY GUID_ACDC_POWER_SOURCE = { 0x5d3e9a59, 0xe9d5, 0x4
 
 constexpr UINT WM_APP_RIPPLE = WM_APP + 10;
 constexpr UINT WM_APP_STATS = WM_APP + 11;
+constexpr UINT WM_APP_DISPLAY = WM_APP + 12;
 constexpr float kPi = 3.14159265358979f;
 constexpr double kFrameMs = 1000.0 / 60.0;
 // The matrix cascade repaints the whole monitor, so it takes a slightly slower
@@ -421,6 +422,11 @@ constexpr wchar_t kMatrixLastChar = L'~';
 
 #ifndef CREATE_WAITABLE_TIMER_HIGH_RESOLUTION
 #define CREATE_WAITABLE_TIMER_HIGH_RESOLUTION 0x00000002
+#endif
+
+// winuser.h only declares this for Windows 7 and later.
+#ifndef WM_DPICHANGED
+#define WM_DPICHANGED 0x02E0
 #endif
 
 struct Settings {
@@ -870,6 +876,15 @@ LRESULT CALLBACK RippleWndProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lP
     if (message == WM_MOUSEACTIVATE) {
         return MA_NOACTIVATE;
     }
+    // The overlays are sized to a monitor rectangle taken when they start, so a
+    // display that changes under one would leave it covering the wrong place.
+    // Closing the effect is cheaper than reworking it mid-flight.
+    if (message == WM_DISPLAYCHANGE || message == WM_DPICHANGED) {
+        if (g_messageWindow) {
+            PostMessageW(g_messageWindow, WM_APP_DISPLAY, 0, 0);
+        }
+        return 0;
+    }
     return DefWindowProcW(hwnd, message, wParam, lParam);
 }
 
@@ -937,13 +952,6 @@ public:
     }
 
     HWND Hwnd() const { return hwnd_; }
-    void AdoptPresented(int x, int y, int width, int height, BYTE alpha) {
-        x_ = x;
-        y_ = y;
-        width_ = width;
-        height_ = height;
-        alpha_ = alpha;
-    }
 
 private:
     HWND hwnd_ = nullptr;
@@ -1192,17 +1200,17 @@ inline uint32_t DimKeep(float amount) {
     return static_cast<uint32_t>(Clamp01(1.0f - amount) * 255.0f + 0.5f);
 }
 
+// Both surfaces are sized by the animation thread before the worker starts,
+// never by the worker itself: a memory DC belongs to the thread that made it,
+// and the worker is gone long before the wave has finished reading the picture.
 struct RippleCapture {
     Surface snapshot;
     Surface canvas;
     RECT monitor{};
     int centerY = 0;
-    HWND window = nullptr;
     HWND notify = nullptr;
     std::atomic<float> frameMs{1000.0f / 60.0f};
     std::atomic<bool> canceled{false};
-    std::atomic<bool> warming{false};
-    std::atomic<bool> warmed{false};
     std::atomic<int> top{0};
     std::atomic<int> bottom{0};
 };
@@ -1265,22 +1273,9 @@ DWORD WINAPI RippleCaptureThreadProc(LPVOID param) {
     };
 
     capture->frameMs = MonitorFrameMs(capture->monitor);
-    bool ok = capture->snapshot.Resize(width, height) && capture->canvas.Resize(width, height);
+    bool ok = capture->snapshot.Valid() && capture->canvas.Valid();
     HDC screen = ok ? GetDC(nullptr) : nullptr;
     ok = ok && screen;
-    if (ok) {
-        capture->warming = true;
-        if (!stopped()) {
-            POINT destination{capture->monitor.left, capture->monitor.top};
-            SIZE size{width, height};
-            POINT source{0, 0};
-            BLENDFUNCTION blend{AC_SRC_OVER, 0, 255, AC_SRC_ALPHA};
-            capture->warmed = UpdateLayeredWindow(capture->window, nullptr, &destination, &size,
-                                                  capture->canvas.Dc(), &source, 0, &blend,
-                                                  ULW_ALPHA) != FALSE;
-        }
-        capture->warming = false;
-    }
     const auto stripes = PlanRippleStripes(width, height, capture->centerY);
     int top = 0;
     int bottom = 0;
@@ -1625,8 +1620,13 @@ public:
         auto capture = std::make_shared<RippleCapture>();
         capture->monitor = monitor_;
         capture->centerY = static_cast<int>(center_.y);
-        capture->window = window_.Hwnd();
         capture->notify = notify;
+        // Made here, on the thread that goes on to read and present them. The
+        // capture worker only draws into them, so their memory DCs outlive it.
+        if (!capture->snapshot.Resize(w, h) || !capture->canvas.Resize(w, h)) {
+            Wh_Log(L"Could not allocate the capture surfaces for %dx%d.", w, h);
+            return false;
+        }
         auto* holder = new std::shared_ptr<RippleCapture>(capture);
         HANDLE thread = CreateThread(nullptr, 0, RippleCaptureThreadProc, holder, 0, nullptr);
         if (!thread) {
@@ -1655,11 +1655,6 @@ public:
             return;
         }
         ResetFrames(surface_.Height());
-        if (capture_->warmed) {
-            window_.AdoptPresented(monitor_.left, monitor_.top, surface_.Width(),
-                                   surface_.Height(), 255);
-            firstFrame_ = false;
-        }
         start_ = std::max(now, NowMs());
         active_ = true;
         Render(start_);
@@ -1688,10 +1683,10 @@ public:
         dimWindow_.SetStrength(0);
         dimLevel_ = 0.0f;
         if (capture_) {
+            // The worker holds its own reference and checks this each stripe,
+            // and it no longer touches the window, so letting it finish on its
+            // own is enough.
             capture_->canceled = true;
-            for (int i = 0; i < 100 && capture_->warming; i++) {
-                Sleep(1);
-            }
             capture_.reset();
         }
         surface_.Reset();
@@ -1798,6 +1793,15 @@ private:
             step_--;
             averageMs_ = -1;
         }
+    }
+
+    // Rows next to a stripe the capture has not written yet have to stay clear
+    // far enough that a sample pushed by the wave cannot land in one. The
+    // Gaussian peaks at 0.6065 of the strength, so that is the furthest a
+    // sample can travel, and the block height covers the shared row shading.
+    int CaptureMargin() const {
+        const float push = 0.6065f * style_.strength * scale_;
+        return static_cast<int>(ceilf(push)) + step_ + 2;
     }
 
     void Render(double now) {
@@ -3152,7 +3156,7 @@ private:
             outer = radius + (static_cast<int>(lastWave) + 1 - offset) * 0.25f + 1.0f;
             const int capturedTop = capture_->top.load(std::memory_order_acquire);
             const int capturedBottom = capture_->bottom.load(std::memory_order_acquire);
-            const int margin = static_cast<int>(ceilf(9.0f * scale_)) + 2;
+            const int margin = CaptureMargin();
             firstY = std::max(capturedTop > 0 ? capturedTop + margin : 0,
                               static_cast<int>(floorf(center_.y - outer)));
             lastY = std::min(capturedBottom < h ? capturedBottom - margin : h,
@@ -3494,7 +3498,7 @@ private:
         // pushes a picture that is still half black.
         const int capturedTop = capture_->top.load(std::memory_order_acquire);
         const int capturedBottom = capture_->bottom.load(std::memory_order_acquire);
-        const int margin = static_cast<int>(ceilf(9.0f * scale_)) + 2;
+        const int margin = CaptureMargin();
         if (capturedTop > 0) {
             firstY = std::max(firstY, capturedTop + margin);
         }
@@ -3822,15 +3826,20 @@ ChargingStats ReadChargingStats() {
         callNtPowerInformation(kSystemBatteryState, nullptr, 0, &state,
                                sizeof(state)) == 0) {
         stats.charging = stats.charging || state.charging != FALSE;
-        stats.rateMw = static_cast<int>(state.rate);
-        if (state.maxCapacity > state.remainingCapacity && state.rate > 0) {
+        // The rate is typed unsigned but carries a sign: it goes negative while
+        // the battery drains, and (ULONG)-1 means the machine cannot tell.
+        const bool rateKnown = state.rate != 0 && state.rate != 0xFFFFFFFFu;
+        const int rateMw = static_cast<int>(state.rate);
+        stats.rateMw = rateMw;
+        if (state.maxCapacity > state.remainingCapacity && rateKnown && rateMw > 0) {
             const double hours = (state.maxCapacity - state.remainingCapacity) /
-                                 static_cast<double>(state.rate);
+                                 static_cast<double>(rateMw);
             stats.minutesToFull = std::max(1, static_cast<int>(hours * 60.0 + 0.5));
         }
-        if (state.discharging && state.rate > 0 && state.remainingCapacity > 0) {
-            const double hours =
-                state.remainingCapacity / static_cast<double>(state.rate);
+        if (state.discharging && rateKnown && state.remainingCapacity > 0) {
+            // Draining reports a negative rate, and the estimate wants its size.
+            const int draw = rateMw < 0 ? -rateMw : rateMw;
+            const double hours = state.remainingCapacity / static_cast<double>(draw);
             const int minutes = static_cast<int>(hours * 60.0 + 0.5);
             if (minutes > 0) {
                 stats.minutesLeft = minutes;
@@ -4474,7 +4483,13 @@ public:
 
     bool Show(const POINT& rippleOrigin, const OverlayStyle& style) {
         style_ = style;
-        rippleOrigin_ = rippleOrigin;
+        // The anchor is settled once, here. Working it out again on each
+        // refresh would let a pointer that has moved to another monitor drag
+        // the card over there, still carrying this monitor's scale and the
+        // blurred backdrop taken from its old spot.
+        anchor_ = KeyIs(style_.position, L"ripple")
+                      ? rippleOrigin
+                      : ResolveRippleOrigin(style_.position);
         const bool wasVisible = visible_;
         if (!window_.Hwnd() && !window_.Create()) {
             Wh_Log(L"Could not create the stats overlay window.");
@@ -4793,7 +4808,7 @@ private:
         const std::wstring detail =
             style_.details ? BuildDetailLine(stats) : std::wstring();
 
-        scale_ = DpiScaleAt(rippleOrigin_);
+        scale_ = DpiScaleAt(anchor_);
         const bool galaxy = KeyIs(style_.theme, L"galaxy");
         springy_ = KeyIs(style_.theme, L"pineapple");
         // The Galaxy and PineApple cards are system HUDs, so they fade and scale
@@ -5660,13 +5675,10 @@ private:
         return PlaceOnScreen(width, height);
     }
 
-    // Centres the surface on the configured anchor and keeps it on the monitor,
-    // clear of the taskbar.
+    // Centres the surface on the anchor settled when the card appeared, and
+    // keeps it on that monitor, clear of the taskbar.
     bool PlaceOnScreen(int width, int height) {
-        const POINT anchor =
-            KeyIs(style_.position, L"ripple") ? rippleOrigin_
-                                              : ResolveRippleOrigin(style_.position);
-        const RECT monitor = UsableRect(anchor);
+        const RECT monitor = UsableRect(anchor_);
         const int margin = std::max(8, static_cast<int>(28.0f * scale_ + 0.5f));
         const int minLeft = static_cast<int>(monitor.left) + margin;
         const int minTop = static_cast<int>(monitor.top) + margin;
@@ -5674,8 +5686,8 @@ private:
             std::max(minLeft, static_cast<int>(monitor.right) - margin - width);
         const int maxTop =
             std::max(minTop, static_cast<int>(monitor.bottom) - margin - height);
-        left_ = std::clamp(static_cast<int>(anchor.x) - width / 2, minLeft, maxLeft);
-        top_ = std::clamp(static_cast<int>(anchor.y) - height / 2, minTop, maxTop);
+        left_ = std::clamp(static_cast<int>(anchor_.x) - width / 2, minLeft, maxLeft);
+        top_ = std::clamp(static_cast<int>(anchor_.y) - height / 2, minTop, maxTop);
         return true;
     }
 
@@ -5712,7 +5724,8 @@ private:
     Color barColor_{};
     bool barSweep_ = false;
     OverlayStyle style_;
-    POINT rippleOrigin_{};
+    // Where the card sits while it is up, settled once when it appears.
+    POINT anchor_{};
     bool visible_ = false;
     bool closing_ = false;
     float scale_ = 1.0f;
@@ -5893,6 +5906,13 @@ LRESULT CALLBACK PowerWindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lPa
         if (pending) {
             g_stats.Show(origin, style);
         }
+        return 0;
+    }
+    if (uMsg == WM_APP_DISPLAY) {
+        // Anything already on screen was laid out for the old display, so it
+        // goes rather than staying behind on the wrong rectangle.
+        g_ripple.Stop();
+        g_stats.Hide();
         return 0;
     }
     if (uMsg == WM_APP_RIPPLE) {
@@ -6124,14 +6144,15 @@ void WhTool_ModUninit() {
 
     if (g_threadId != 0 && g_hThread != NULL) {
         if (g_readyEvent) WaitForSingleObject(g_readyEvent, INFINITE);
-        // Wake the message loop: the timer is the fallback when WM_QUIT doesn't.
-        if (g_rippleTimer) {
-            LARGE_INTEGER dueTime;
-            dueTime.QuadPart = -10000;  // 1 ms.
-            SetWaitableTimer(g_rippleTimer, &dueTime, 0, nullptr, nullptr, FALSE);
+        // The loop watches its message queue as well as its timer, so a posted
+        // quit wakes it. The timer itself is left alone here: it belongs to
+        // that thread, which closes it on the way out.
+        if (!PostThreadMessageW(g_threadId, WM_QUIT, 0, 0)) {
+            Wh_Log(L"Could not post the quit to the message thread: %u", GetLastError());
         }
-        PostThreadMessageW(g_threadId, WM_QUIT, 0, 0);
-        WaitForSingleObject(g_hThread, INFINITE);
+        if (WaitForSingleObject(g_hThread, 5000) != WAIT_OBJECT_0) {
+            Wh_Log(L"The message thread did not exit in time.");
+        }
         CloseHandle(g_hThread);
         g_hThread = NULL;
         g_threadId = 0;
