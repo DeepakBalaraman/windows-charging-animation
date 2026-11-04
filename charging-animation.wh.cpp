@@ -35,8 +35,9 @@ tinted with the event color. `Origin` moves where it starts, either one of nine 
 the pointer or `Cursor Position` to use the pointer itself.
 
 **Edge Glow** never touches the desktop. A band of light swells out of the screen borders, and one bright
-spot travels around them while it's up. Set the color to `rainbow` and the band becomes a gradient running
-around the screen; `Motion` sets how the spot speeds up and slows down.
+spot travels around them while it's up, coming in from the border nearest `Origin`. Set the color to
+`rainbow` and the band becomes a gradient running around the screen; `Motion` sets how the spot speeds up
+and slows down.
 
 **Bezel** presses the screen in. A dark frame grows out of all four edges, its inner lip catching a little
 light, and the desktop, captured once when the animation starts, is shrunk to fit inside it, so the whole
@@ -45,13 +46,17 @@ by the same amount both ways, so the frame comes out a little thinner across the
 picture sinks into the frame's shadow and creeps a little deeper as it settles, then holds and lets go.
 Because the shrunk picture is a still image, the effect gives up after about two seconds whatever `Duration`
 says. The frame is plain black and grey throughout, with no tint on it. `Strength` sets how far in it comes,
-about 16 pixels on the long edge at the default.
+about 16 pixels on the long edge at the default. It presses all four edges by the same amount, so it has no
+starting point and no direction of travel: `Origin` and `Unplug direction` are hidden while Bezel is
+chosen.
 
 **Circuit Trace** is the quiet one. Board traces fade in along the bottom of the screen, above the
 taskbar: a power rail runs the width of the monitor, risers drop off it, elbows turn up out of the bottom
 corners. A pulse runs along each trace in turn, lighting its end as it arrives, and then the board fades
 out. Nothing is captured from the desktop. `Strength` sets how thick the traces are and how far their glow
-spills, and the layout is different on every event.
+spills, and the layout is different on every event. The board runs along the bottom edge rather than around
+a point, so it has no `Origin`; `Reverse` on an unplug sends each current the other way, out of the far end
+and back into the rail, so the board drains instead of charging.
 
 **Matrix Code** is the busy one. Columns of characters drop down the screen, each a bright head over a
 trail that dims as it falls, and some cells in a trail stay dark, which is what turns a solid bar into a
@@ -60,7 +65,8 @@ the columns are let go from the `Origin` outward, so the cascade spreads across 
 The characters are the event color, with the head of each column close to white, and on `rainbow` the
 columns take different points of the gradient. Nothing is captured from the desktop. `Strength` sets how
 long the trails are. Like the bezel it is a burst rather than a slow move, so it gives up after about two
-seconds whatever `Duration` says.
+seconds whatever `Duration` says. `Reverse` on an unplug turns the cascade around: the characters run
+upward, and the release starts at the edges and closes in on `Origin` instead of spreading out from it.
 
 **Colors.** `Plugged-in color` and `Unplugged color` each tint their own event. Pick one from the list, or
 choose Custom and type into the field that appears underneath. On Windhawk 2.0 that field is a color
@@ -92,7 +98,8 @@ animation turned off for an event there is nothing to dim.
 
 **Unplug direction** picks which way the unplug travels. `Forwards` plays it exactly like a plug-in,
 expanding from the origin; `Reverse` starts at the screen edges and collapses back to the origin, like the
-charge being pulled away. Only Wave and Edge Glow use it.
+charge being pulled away. Wave, Edge Glow, Circuit Trace and Matrix Code use it, and Bezel hides it because
+it has nowhere to travel.
 
 ## Sounds
 
@@ -192,7 +199,7 @@ and the card.
     $description: "The color used when the choice above is Custom, e.g. #4285F4, #48F or 66,133,244."
     #! $format: colorRgb
     #! $showIf: {PluggedInColor: custom}
-  - UnpluggedColor: red
+  - UnpluggedColor: accent
     $name: Unplugged color
     $description: "Color of the animation when the charger is disconnected. Choose Custom to use the color below."
     $options:
@@ -219,15 +226,15 @@ and the card.
     #! $showIf: {UnpluggedColor: custom}
   - UnplugDirection: reverse
     $name: Unplug direction
-    $description: "Which way the unplug animation travels. Forwards plays it exactly like plugging in, expanding out from the origin; Reverse starts at the screen edges and collapses back in toward it. Only Wave and Edge Glow use this."
-    #! $showIf: {Animation: [ripple, edgeglow]}
+    $description: "Which way the unplug animation travels. Forwards plays it exactly like plugging in, moving out from the origin; Reverse starts at the screen edges and collapses back in toward it. Wave, Edge Glow, Circuit Trace and Matrix Code use this."
+    #! $showIf: {Animation: [ripple, edgeglow, circuit, matrix]}
     $options:
       - forwards: Forwards (Expand)
       - reverse: Reverse (Collapse)
   - Origin: bottom
     $name: Origin
-    $description: "Where the animation starts on the monitor under the cursor. Wave starts here, and the cascade is released from here outward. Cursor Position follows the pointer itself."
-    #! $showIf: {Animation: [ripple, matrix]}
+    $description: "Where the animation starts on the monitor under the cursor. Wave grows from here, Edge Glow brings its travelling highlight in along the border from here, and the cascade is released from here outward. Cursor Position follows the pointer itself."
+    #! $showIf: {Animation: [ripple, edgeglow, matrix]}
     $options:
       - topleft: Top Left
       - top: Top
@@ -1870,6 +1877,13 @@ private:
         bandPx_ = std::max(2, static_cast<int>(ceilf(band_)));
         glowLut_.assign(static_cast<size_t>(bandPx_) + 1, 0.0f);
         UpdateGlowFalloff(band_);
+        // The travelling highlight enters from the border point nearest the
+        // origin, measured on the same angle the perimeter is read on, so the
+        // light comes in where the user pointed it.
+        const float dx = center_.x - static_cast<float>(w) * 0.5f;
+        const float dy = center_.y - static_cast<float>(h) * 0.5f;
+        glowStart_ = FastAtan2(dy, dx) / (2.0f * kPi) + 0.5f;
+        glowStart_ -= floorf(glowStart_);
     }
 
     // Rebuilds the falloff for the width lit this frame, so the band can swell out
@@ -1920,10 +1934,11 @@ private:
         }
         const uint32_t flat = PackPremultiplied(g_glow.color, 1.0f);
 
-        // The hot spot travels once around the screen, running backwards for
-        // reverse events.
+        // The hot spot travels once around the screen, starting at the origin and
+        // running the other way round for reverse events.
         const float travel = EaseTravel(style_.curve, t);
-        const float spot = style_.reverse ? 1.0f - travel : travel;
+        const float spot =
+            style_.reverse ? glowStart_ - travel : glowStart_ + travel;
         constexpr int kHeadSteps = 128;
         float spotLut[kHeadSteps];
         for (int i = 0; i < kHeadSteps; i++) {
@@ -2271,7 +2286,12 @@ private:
                 if (local <= 0.0f) {
                     continue;
                 }
-                const float head = local * (trace.length + tail) - tail;
+                // Forwards the current leaves the rail and runs out to the far end
+                // of the trace; reverse runs it back the other way, so an unplug
+                // drains the board instead of charging it.
+                const bool back = style_.reverse;
+                const float travelLen = local * (trace.length + tail);
+                const float head = back ? trace.length - travelLen : travelLen - tail;
                 const float lit = base * Clamp01(local * 3.0f);
                 float arc = 0.0f;
                 for (size_t i = 1; i < trace.path.size(); i++) {
@@ -2285,8 +2305,9 @@ private:
                     }
                     // The head brightness only changes along the run, so the two
                     // ends are enough and the pixels between them interpolate.
-                    const float g0 = CircuitGlow(arc - head, tail);
-                    const float g1 = CircuitGlow(arc + length - head, tail);
+                    const float g0 = CircuitGlow(back ? head - arc : arc - head, tail);
+                    const float g1 = CircuitGlow(
+                        back ? head - (arc + length) : (arc + length) - head, tail);
                     arc += length;
 
                     const int bx0 = std::max(
@@ -2336,8 +2357,11 @@ private:
                 // arrives and settles back to the standby glow with it.
                 if (trace.pad && !trace.path.empty()) {
                     const CircuitNode& end = trace.path.back();
-                    const float current =
-                        lit + CircuitGlow(trace.length - head, tail) * peak;
+                    // A reverse current arrives at the via first and lets it go,
+                    // so the pad flares as the run starts rather than as it ends.
+                    const float arrival =
+                        back ? head - trace.length : trace.length - head;
+                    const float current = lit + CircuitGlow(arrival, tail) * peak;
                     const int px0 = std::max(
                         clipX0, static_cast<int>(floorf(end.x - padRadius)));
                     const int px1 = std::min(
@@ -2388,8 +2412,8 @@ private:
     // long its trail is and when the sweep out of the origin releases it.
     struct MatrixColumn {
         int left = 0;        // first pixel column it owns
-        float head = 0.0f;   // where the head starts, in cells above the top
-        float speed = 0.0f;  // cells per second
+        float head = 0.0f;   // where the head starts, in cells off screen
+        float speed = 0.0f;  // cells per second, negative when it climbs
         float trail = 0.0f;  // cells lit behind the head
         float delay = 0.0f;  // seconds before the sweep reaches it
         float hue = 0.0f;    // where it samples the palette
@@ -2471,8 +2495,8 @@ private:
         const float span = static_cast<float>(SpanMs());
         const int rows = std::max(1, (h + cellH - 1) / cellH);
         const int cols = std::max(1, (w + cellW - 1) / cellW);
-        // The sweep releases the columns from the origin outward, so a head only
-        // has the rest of the span to fall past the bottom edge.
+        // The sweep releases the columns one after another, so the last ones to
+        // go only have the rest of the span to cross the screen.
         const float sweepMs = std::min(420.0f, span * 0.30f);
         const float fallMs = std::max(240.0f, span * 0.85f - sweepMs);
         const float trailCells =
@@ -2492,21 +2516,29 @@ private:
             MatrixColumn& column = matrixColumns_[static_cast<size_t>(i)];
             column.left = i * cellW;
             column.trail = trailCells * (0.55f + 0.85f * next());
-            column.speed = travel * (0.70f + 0.60f * next());
-            // Every head starts above the screen, so the columns enter it rather
-            // than blinking into place.
-            column.head = -column.trail * (0.4f + next());
-            const float sideways =
-                fabsf(static_cast<float>(column.left) - center_.x) / halfWidth;
-            column.delay = Clamp01(sideways) * sweepMs * 0.001f;
+            const float speed = travel * (0.70f + 0.60f * next());
+            // Forwards the characters fall and the columns are released from the
+            // origin outward. Reverse sends them back up and starts the release
+            // at the edges, so the cascade closes in on the origin instead.
+            column.speed = style_.reverse ? -speed : speed;
+            // Every head starts off screen, so the columns enter it rather than
+            // blinking into place.
+            column.head = style_.reverse
+                              ? static_cast<float>(rows) + column.trail * (0.4f + next())
+                              : -column.trail * (0.4f + next());
+            const float sideways = Clamp01(
+                fabsf(static_cast<float>(column.left) - center_.x) / halfWidth);
+            column.delay =
+                (style_.reverse ? 1.0f - sideways : sideways) * sweepMs * 0.001f;
             column.hue = next();
             column.blank = static_cast<uint32_t>(18.0f + 46.0f * next());
         }
     }
 
-    // The cascade itself: characters falling in columns, let go from the origin
-    // outward and fading away. Nothing is captured from the desktop, so it costs
-    // nothing to start and nothing lingers once it is over.
+    // The cascade itself: columns of characters, released from the origin outward
+    // on the way in and closing back onto it on the way out, then fading away.
+    // Nothing is captured from the desktop, so it costs nothing to start and
+    // nothing lingers once it is over.
     void RenderMatrix(double now) {
         const int w = surface_.Width();
         const int h = surface_.Height();
@@ -2555,15 +2587,26 @@ private:
                 return;
             }
             const float head = column.head + column.speed * local;
-            const int firstRow =
-                std::max(0, static_cast<int>(floorf(head - column.trail)) + 1);
-            const int lastRow = std::min(rows - 1, static_cast<int>(floorf(head)));
+            // The trail always sits behind the head, whichever way the head is
+            // running: below it on the way down, above it on the way up.
+            const float dir = column.speed >= 0.0f ? 1.0f : -1.0f;
+            const float tailEnd = head + (dir > 0.0f ? -column.trail : column.trail);
+            const int firstRow = std::max(
+                0, static_cast<int>(floorf(std::min(head, tailEnd))));
+            const int lastRow = std::min(
+                rows - 1, static_cast<int>(floorf(std::max(head, tailEnd))));
             if (firstRow > lastRow) {
                 return;
             }
+            // Rows are measured from the cell edge the head came in through, so
+            // the cell it sits in is the brightest one in both directions.
+            const float cellBase = head + (dir > 0.0f ? 0.0f : 1.0f);
             const Color tint = g_glow.At(fmodf(column.hue + drift, 1.0f));
             for (int row = firstRow; row <= lastRow; row++) {
-                const float age = head - static_cast<float>(row);
+                const float age = dir * (cellBase - static_cast<float>(row));
+                if (age < 0.0f || age > column.trail) {
+                    continue;
+                }
                 const float q = Clamp01(1.0f - age / column.trail);
                 // The head of a stream is a bright character that flickers to a
                 // new one several times a second; the trail behind it is the
@@ -2574,7 +2617,10 @@ private:
                 float alpha;
                 Color ink;
                 if (age < 1.1f) {
-                    pick = MatrixHash(seed, static_cast<uint32_t>(head * 2.5f)) %
+                    // Rounded first: a column leaving the screen can sit a little
+                    // above the top edge, and the hash takes a plain count.
+                    const float tick = std::max(0.0f, head) * 2.5f;
+                    pick = MatrixHash(seed, static_cast<uint32_t>(tick)) %
                            glyphCount;
                     ink = Mix(tint, white, 0.72f);
                     alpha = 0.95f;
@@ -3079,6 +3125,8 @@ private:
     std::vector<float> glowLut_;
     float band_ = 0;
     int bandPx_ = 0;
+    // Where on the perimeter the travelling highlight comes in, 0 to 1.
+    float glowStart_ = 0.0f;
     // Dark bezel: the snapshot that gets scaled into the smaller rect, how deep
     // the push goes, and the cross section of frame, shadow and fold by distance
     // from the inner edge.
