@@ -50,12 +50,15 @@ about 16 pixels on the long edge at the default. It presses all four edges by th
 starting point and no direction of travel: `Origin` and `Unplug direction` are hidden while Bezel is
 chosen.
 
-**Circuit Trace** is the quiet one. Board traces fade in along the bottom of the screen, above the
-taskbar: a power rail runs the width of the monitor, risers drop off it, elbows turn up out of the bottom
-corners. A pulse runs along each trace in turn, lighting its end as it arrives, and then the board fades
-out. Nothing is captured from the desktop. `Strength` sets how thick the traces are and how far their glow
+**Circuit Trace** is the quiet one. A circuit board wakes along the bottom of the screen, above the
+taskbar: a power rail steps across the width of the monitor at forty-five degrees, a bundle of thin signal
+lines runs beside one stretch of it and fans away at both ends, risers drop off the rail into drilled vias,
+and elbows turn up out of the bottom corners. A charge runs along each trace in turn, close to white at its
+head with a long tail of light behind it, and the via it is heading for rings as it arrives. Between pulses
+the copper only glows faintly, the way a board runs on standby power, and then the whole thing fades out.
+Nothing is captured from the desktop. `Strength` sets how thick the traces are and how far their glow
 spills, and the layout is different on every event. The board runs along the bottom edge rather than around
-a point, so it has no `Origin`; `Reverse` on an unplug sends each current the other way, out of the far end
+a point, so it has no `Origin`; `Reverse` on an unplug sends each charge the other way, out of the far end
 and back into the rail, so the board drains instead of charging.
 
 **Matrix Code** is the busy one. Columns of characters drop down the screen, each a bright head over a
@@ -1679,6 +1682,11 @@ public:
         circuitTraces_.clear();
         circuitBands_.clear();
         circuitFalloff_.clear();
+        circuitCov_.clear();
+        circuitHeat_.clear();
+        circuitTint_.clear();
+        circuitLayerW_ = 0;
+        circuitLayerH_ = 0;
         matrixColumns_.clear();
         matrixAtlas_.Reset();
         matrixGlyphs_ = 0;
@@ -1710,20 +1718,29 @@ private:
         float x, y;
     };
 
-    // One run of copper: a polyline that a single current travels along. The
-    // delay keeps the runs from all firing at the same instant, and a run that
-    // ends in a pad terminates in a via rather than simply stopping.
+    // One run of copper: a polyline that a single charge travels along. The
+    // delay keeps the runs from all firing at the same instant, the weight is
+    // how wide the track is next to the rail, and a run that ends in a via
+    // finishes in a drilled pad rather than simply stopping.
     struct CircuitTrace {
         std::vector<CircuitNode> path;
         float length = 0.0f;
         float delay = 0.0f;
-        bool pad = false;
+        float weight = 1.0f;
+        float tint = 0.0f;
+        bool via = false;
     };
 
-    // How bright the current is a given distance behind the head of the surge:
-    // nothing ahead of it, full strength at it, decaying in its wake.
+    // How hard the charge hits a point a given distance behind its head:
+    // nothing ahead of it, a hot spark right at it, and a wake that fades out
+    // behind like a comet's.
     static float CircuitGlow(float distance, float tail) {
-        return distance >= 0.0f ? 0.0f : expf(distance / tail);
+        if (distance >= 0.0f) {
+            return 0.0f;
+        }
+        const float spark = expf(-(distance * distance) / (tail * tail * 0.05f));
+        const float wake = expf(distance / tail);
+        return std::min(1.6f, spark + wake);
     }
 
     void ResetFrames(int height) {
@@ -2027,31 +2044,42 @@ private:
         }
     }
 
-    // The circuit is drawn rather than sampled, so its falloff is a table indexed
-    // by distance from the copper: a hot line right on it and a soft bleed around.
+    // The circuit is drawn rather than sampled, so its cross section is a table
+    // indexed by distance from the copper: a solid core with a one pixel
+    // antialiased edge, a tight sheath of light around it, and a wide bloom that
+    // washes outward and dies out at the reach.
     void BuildCircuitFalloff() {
-        circuitThickness_ = std::max(1.0f, (0.55f + style_.strength * 0.04f) * scale_);
-        circuitReach_ = std::max(4.0f, (3.0f + style_.strength * 0.3f) * scale_);
-        const int cells = static_cast<int>(circuitReach_ * 4.0f) + 8;
-        circuitFalloff_.assign(static_cast<size_t>(cells), 0.0f);
+        circuitThickness_ = std::max(0.9f, (0.75f + style_.strength * 0.045f) * scale_);
+        circuitReach_ = std::max(5.0f, (4.0f + style_.strength * 0.34f) * scale_);
+        const int cells = static_cast<int>(circuitReach_ * kCircuitLutScale) + 2;
+        circuitFalloff_.assign(static_cast<size_t>(cells), 0);
+        const float half = circuitThickness_ * 0.5f;
         for (int i = 0; i < cells; i++) {
-            const float d = static_cast<float>(i) * 0.25f;
-            const float core = Clamp01(1.0f - d / circuitThickness_);
-            const float halo = powf(Clamp01(1.0f - d / circuitReach_), 2.6f) * 0.42f;
-            circuitFalloff_[static_cast<size_t>(i)] = std::min(1.0f, core + halo);
+            const float d = static_cast<float>(i) / kCircuitLutScale;
+            const float solid = Clamp01(half + 0.5f - d);
+            const float sheath =
+                0.34f * expf(-(d * d) / (half * half * 6.0f + 0.25f));
+            const float q = Clamp01(1.0f - d / circuitReach_);
+            const float bloom = 0.30f * q * q * q;
+            const float total = solid + (sheath + bloom) * (1.0f - solid);
+            circuitFalloff_[static_cast<size_t>(i)] =
+                static_cast<uint8_t>(Clamp01(total) * 255.0f + 0.5f);
         }
     }
 
     // Files a run away with its length already summed, since that is the distance
-    // the current has to travel along it.
-    void AddCircuitTrace(std::vector<CircuitNode> path, float delay, bool pad) {
+    // the charge has to travel along it.
+    void AddCircuitTrace(std::vector<CircuitNode> path, float delay, bool via,
+                         float weight, float tint) {
         if (path.size() < 2) {
             return;
         }
         CircuitTrace trace;
         trace.path = std::move(path);
         trace.delay = delay;
-        trace.pad = pad;
+        trace.via = via;
+        trace.weight = weight;
+        trace.tint = tint;
         for (size_t i = 1; i < trace.path.size(); i++) {
             const float dx = trace.path[i].x - trace.path[i - 1].x;
             const float dy = trace.path[i].y - trace.path[i - 1].y;
@@ -2061,10 +2089,11 @@ private:
     }
 
     // Lays the board out once, when the effect starts: a power rail across the
-    // bottom of the screen that changes lane at forty-five degrees, risers
-    // dropping off it toward the taskbar that terminate in vias, elbows turning
-    // out of both bottom corners, and runs in the two top corners. The traces are
-    // all that is ever drawn, so their bounding bands are kept for presentation.
+    // bottom of the screen that changes lane at forty-five degrees, a bundle of
+    // thin signal lines beside one stretch of it, risers dropping off the rail
+    // toward the taskbar that finish in vias, elbows turning out of both bottom
+    // corners, and runs in the two top corners. The traces are all that is ever
+    // drawn, so their bounding bands are kept for presentation.
     void BuildCircuitProfile(int w, int h) {
         circuitTraces_.clear();
         circuitBands_.clear();
@@ -2076,7 +2105,9 @@ private:
         int bottomH = static_cast<int>(
             std::clamp(static_cast<float>(h) * 0.17f, 78.0f * scale_, 250.0f * scale_));
         bottomH = std::min(bottomH, std::max(24, workBottom - 8));
-        const int reach = static_cast<int>(ceilf(circuitReach_));
+        // The rail is the widest run on the board, so its reach is what the
+        // bands are padded with.
+        const int reach = static_cast<int>(ceilf(circuitReach_ * 1.6f));
 
         uint32_t seed = static_cast<uint32_t>(NowMs()) | 1u;
         auto next = [&seed]() {
@@ -2100,12 +2131,12 @@ private:
         std::vector<Lane> lanes;
         std::vector<CircuitNode> rail;
         float laneY = std::clamp(static_cast<float>(workBottom) -
-                                     static_cast<float>(bottomH) * 0.66f,
+                                     static_cast<float>(bottomH) * 0.64f,
                                  railMin, railMax);
         float x = -30.0f;
         rail.push_back({x, laneY});
         while (x < static_cast<float>(w) + 30.0f) {
-            const float end = x + (110.0f + unit() * 190.0f) * scale_;
+            const float end = x + (120.0f + unit() * 200.0f) * scale_;
             rail.push_back({end, laneY});
             lanes.push_back({laneY, x, end});
             if (end > static_cast<float>(w) + 30.0f) {
@@ -2118,7 +2149,32 @@ private:
             laneY = nextY;
             rail.push_back({x, laneY});
         }
-        AddCircuitTrace(std::move(rail), 0.0f, false);
+        // The rail carries the charge for the whole board, so it is drawn wider
+        // than anything else on it.
+        AddCircuitTrace(std::move(rail), 0.0f, false, 1.45f, 0.0f);
+
+        // A bundle of thin signal lines runs beside one of the long stretches
+        // and fans away at both ends, the way a bus leaves the power rail.
+        if (!lanes.empty()) {
+            const Lane& lane = lanes[next() % lanes.size()];
+            const float gap = std::max(2.4f, circuitThickness_ * 2.6f);
+            const float busX0 = lane.x0 + 20.0f * scale_;
+            const float busX1 = lane.x1 - 20.0f * scale_;
+            if (busX1 - busX0 > 140.0f * scale_) {
+                for (int i = 0; i < 3; i++) {
+                    const float drop = gap * static_cast<float>(i + 1);
+                    const float y = lane.y + drop;
+                    const float ramp = drop + 8.0f * scale_;
+                    std::vector<CircuitNode> line;
+                    line.push_back({busX0 - ramp, y + ramp});
+                    line.push_back({busX0, y});
+                    line.push_back({busX1, y});
+                    line.push_back({busX1 + ramp, y + ramp});
+                    AddCircuitTrace(std::move(line), 0.05f + 0.03f * i, true,
+                                    0.62f, 0.03f + 0.035f * i);
+                }
+            }
+        }
 
         // Risers leave the rail for the taskbar and end in a via, the way a track
         // leaves the board to meet a connector.
@@ -2137,7 +2193,8 @@ private:
                 std::vector<CircuitNode> riser;
                 riser.push_back({riserX, lane.y});
                 riser.push_back({riserX, floorY - unit() * 12.0f * scale_});
-                AddCircuitTrace(std::move(riser), 0.12f + unit() * 0.26f, true);
+                AddCircuitTrace(std::move(riser), 0.12f + unit() * 0.26f, true,
+                                0.8f + unit() * 0.3f, 0.10f + unit() * 0.10f);
                 break;
             }
         }
@@ -2157,7 +2214,8 @@ private:
             elbow.push_back({edge + dir * inset, topY + turn});
             elbow.push_back({edge + dir * (inset + turn), topY});
             elbow.push_back({edge + dir * (inset + turn + run), topY});
-            AddCircuitTrace(std::move(elbow), 0.06f + 0.1f * side, true);
+            AddCircuitTrace(std::move(elbow), 0.06f + 0.1f * side, true, 1.1f,
+                            0.18f + 0.05f * side);
         }
 
         const int topH =
@@ -2181,7 +2239,8 @@ private:
                 top.push_back({startX, drop});
                 top.push_back({startX + dir * turn, drop + turn});
                 top.push_back({startX + dir * (turn + run), drop + turn});
-                AddCircuitTrace(std::move(top), 0.08f + 0.07f * side, true);
+                AddCircuitTrace(std::move(top), 0.08f + 0.07f * side, true, 0.95f,
+                                0.24f + 0.05f * side);
 
                 // A shorter run below it, entering from off the edge, so the
                 // corner has a little density instead of a single line.
@@ -2190,7 +2249,8 @@ private:
                 std::vector<CircuitNode> spur;
                 spur.push_back({edge - dir * 6.0f, spurY});
                 spur.push_back({edge + dir * spurRun, spurY});
-                AddCircuitTrace(std::move(spur), 0.18f + 0.06f * side, true);
+                AddCircuitTrace(std::move(spur), 0.18f + 0.06f * side, true, 0.7f,
+                                0.30f + 0.05f * side);
             }
         }
 
@@ -2202,22 +2262,43 @@ private:
             circuitBands_.push_back(RECT{0, 0, std::min(w, cornerW), bandH});
             circuitBands_.push_back(RECT{std::max(0, w - cornerW), 0, w, bandH});
         }
+
+        // The scratch each band is accumulated into, one for coverage, one for
+        // how hot the charge is there and one for the tint of the run that laid
+        // the copper. It is sized once for the widest and tallest band and
+        // reused for all of them.
+        int layerW = 0;
+        int layerH = 0;
+        for (const RECT& band : circuitBands_) {
+            layerW = std::max(layerW, static_cast<int>(band.right - band.left));
+            layerH = std::max(layerH, static_cast<int>(band.bottom - band.top));
+        }
+        circuitLayerW_ = std::max(1, layerW);
+        circuitLayerH_ = std::max(1, layerH);
+        const size_t layerPixels =
+            static_cast<size_t>(circuitLayerW_) * static_cast<size_t>(circuitLayerH_);
+        circuitCov_.assign(layerPixels, 0);
+        circuitHeat_.assign(layerPixels, 0);
+        circuitTint_.assign(layerPixels, 0);
     }
 
-    // The circuit trace: the board wakes up faintly, one current runs along every
-    // trace in turn leaving a glow in its wake, the vias flare as it arrives, and
-    // the whole thing dims back to nothing.
+    // The circuit trace: the board wakes up faintly, a charge runs along every
+    // trace in turn leaving a wake behind it, the vias ring as it arrives, and
+    // the whole thing fades back to nothing.
     void RenderCircuit(double now) {
         const int w = surface_.Width();
         const int h = surface_.Height();
-        if (w <= 0 || h <= 0 || circuitBands_.empty() || circuitFalloff_.empty()) {
+        if (w <= 0 || h <= 0 || circuitBands_.empty() || circuitFalloff_.empty() ||
+            circuitLayerW_ <= 0 ||
+            circuitCov_.size() <
+                static_cast<size_t>(circuitLayerW_) * static_cast<size_t>(circuitLayerH_)) {
             return;
         }
 
         const float span = static_cast<float>(style_.durationMs);
         const float elapsed = static_cast<float>(now - start_);
-        const float inMs = std::min(180.0f, span * 0.25f);
-        const float outMs = std::min(span * 0.35f, 640.0f);
+        const float inMs = std::min(200.0f, span * 0.25f);
+        const float outMs = std::min(span * 0.32f, 700.0f);
         float envelope = 1.0f;
         if (elapsed < inMs) {
             const float q = Clamp01(elapsed / inMs);
@@ -2227,41 +2308,63 @@ private:
             envelope = 1.0f - q * q * (3.0f - 2.0f * q);
         }
 
-        // The current crosses each trace once; what is left afterwards is the
+        // The charge crosses each trace once; what is left afterwards is the
         // board breathing on standby power until the fade takes it.
         const float travelMs = std::clamp(span * 0.45f, 240.0f, 900.0f);
         const float lead = inMs * 0.6f;
-        const float tail = 62.0f * scale_;
+        const float tail = 64.0f * scale_;
         const float t = Clamp01(elapsed / span);
-        const float breath = 0.8f + 0.2f * sinf(t * 12.566371f);
-        const float base = 0.26f * envelope * breath * style_.opacity;
-        const float peak = 1.5f * envelope * style_.opacity;
+        const float breath = 0.85f + 0.15f * sinf(t * 9.424778f);
+        const float standby = 0.18f * envelope * breath * style_.opacity;
+        const float peak = 0.95f * envelope * style_.opacity;
 
-        // Each run takes its own sample of the palette, so a rolling gradient ends
-        // up with different colors on different traces.
+        // The board carries one current, so it travels at one speed on every
+        // trace: a short run is over in a flash, and the longest run, which is
+        // always the rail, takes the whole travel time.
+        float longest = 1.0f;
+        for (const CircuitTrace& run : circuitTraces_) {
+            longest = std::max(longest, run.length);
+        }
+        const float speed = (longest + tail) / std::max(1.0f, travelMs);
+        auto localOf = [&](const CircuitTrace& run) {
+            const float runMs = std::max(48.0f, (run.length + tail) / speed);
+            return Clamp01((elapsed - lead - run.delay * travelMs) / runMs);
+        };
+
+        // How hard the charge hits a point only depends on how far behind the
+        // head that point is, so the profile is a table and the per pixel work
+        // is one subtraction and one lookup. Interpolating between the two ends
+        // of a segment instead would put the head in the wrong place on a long
+        // run, which is what a straight line the width of the screen would show.
+        const float tailSpan = tail * 4.5f;
+        float glowLut[256];
+        for (int i = 0; i < 256; i++) {
+            const float along =
+                -tailSpan + tailSpan * (static_cast<float>(i) + 0.5f) / 256.0f;
+            glowLut[i] = CircuitGlow(along, tail);
+        }
+        const float glowScale = 256.0f / tailSpan;
+        const float heatScale = 1.0f / 1.6f;
+
+        // Each run takes its own sample of the palette, so a rolling gradient
+        // ends up with different colors on different traces.
         std::vector<Color> tints(circuitTraces_.size());
         for (size_t i = 0; i < tints.size(); i++) {
-            tints[i] = g_glow.At(
-                fmodf(0.12f + static_cast<float>(i) * 0.11f + t * 0.15f, 1.0f));
+            tints[i] = g_glow.At(fmodf(circuitTraces_[i].tint + t * 0.15f, 1.0f));
         }
 
-        const float* lut = circuitFalloff_.data();
+        const uint8_t* lut = circuitFalloff_.data();
         const int lutCount = static_cast<int>(circuitFalloff_.size());
-        const float padRadius =
-            std::max(2.0f, circuitThickness_ * 1.9f + 1.5f * scale_);
+        const int layerW = circuitLayerW_;
+        uint8_t* covBase = circuitCov_.data();
+        uint8_t* heatBase = circuitHeat_.data();
+        uint8_t* tintBase = circuitTint_.data();
+        const bool back = style_.reverse;
         const Color white = Rgb(255, 255, 255);
-
-        // The copper is nearly white where it is brightest and only takes the event
-        // color further out, which is what makes it read as light rather than paint.
-        auto blendPixel = [&](int px, int py, const Color& line, float coverage,
-                              float current) {
-            const float alpha = Clamp01(coverage * current);
-            if (alpha <= 0.004f) {
-                return;
-            }
-            BlendOver(surface_.Row(py)[px],
-                      PackPremultiplied(Mix(line, white, alpha * 0.55f), alpha));
-        };
+        const Color holeInk = Rgb(10, 12, 16);
+        // A via is a drilled pad, so it is wider than the track that reaches it.
+        const float padRadius = std::max(2.5f, circuitThickness_ * 3.4f);
+        const float holeRadius = padRadius * 0.38f;
 
         auto drawBand = [&](const RECT& band) {
             const int clipX0 = std::clamp(static_cast<int>(band.left), 0, w);
@@ -2271,28 +2374,38 @@ private:
             if (clipX1 <= clipX0 || clipY1 <= clipY0) {
                 return false;
             }
-            // Only the band is touched, so every other row keeps the transparent
-            // pixels it already holds.
+            const int spanW = clipX1 - clipX0;
+            const int spanH = clipY1 - clipY0;
+
+            // Only the band is touched, so every other row keeps the clear pixels
+            // it already holds.
             for (int y = clipY0; y < clipY1; y++) {
                 memset(surface_.Row(y) + clipX0, 0,
-                       static_cast<size_t>(clipX1 - clipX0) * sizeof(uint32_t));
+                       static_cast<size_t>(spanW) * sizeof(uint32_t));
+                const size_t at = static_cast<size_t>(y - clipY0) * layerW;
+                memset(covBase + at, 0, static_cast<size_t>(spanW));
+                memset(heatBase + at, 0, static_cast<size_t>(spanW));
+                memset(tintBase + at, 0, static_cast<size_t>(spanW));
             }
 
+            // Every pixel of copper is collected first and blended once, so the
+            // joints where two segments meet are not laid down twice and the
+            // corners come out clean instead of blotchy.
             for (size_t index = 0; index < circuitTraces_.size(); index++) {
                 const CircuitTrace& trace = circuitTraces_[index];
-                const Color line = tints[index];
-                const float local =
-                    Clamp01((elapsed - lead - trace.delay * travelMs) / travelMs);
+                const float local = localOf(trace);
                 if (local <= 0.0f) {
                     continue;
                 }
-                // Forwards the current leaves the rail and runs out to the far end
-                // of the trace; reverse runs it back the other way, so an unplug
-                // drains the board instead of charging it.
-                const bool back = style_.reverse;
+                // Forwards the charge leaves the rail and runs out to the far
+                // end of the trace; reverse runs it back the other way, so an
+                // unplug drains the board instead of charging it.
                 const float travelLen = local * (trace.length + tail);
                 const float head = back ? trace.length - travelLen : travelLen - tail;
-                const float lit = base * Clamp01(local * 3.0f);
+                const float weight = std::max(0.4f, trace.weight);
+                const float reach = circuitReach_ * weight;
+                const uint8_t tintIndex =
+                    static_cast<uint8_t>(std::min<size_t>(index, 255));
                 float arc = 0.0f;
                 for (size_t i = 1; i < trace.path.size(); i++) {
                     const CircuitNode& a = trace.path[i - 1];
@@ -2303,25 +2416,25 @@ private:
                     if (length < 0.01f) {
                         continue;
                     }
-                    // The head brightness only changes along the run, so the two
-                    // ends are enough and the pixels between them interpolate.
-                    const float g0 = CircuitGlow(back ? head - arc : arc - head, tail);
-                    const float g1 = CircuitGlow(
-                        back ? head - (arc + length) : (arc + length) - head, tail);
+                    // Where the head sits on this segment, as a fraction of it.
+                    // A segment the head has already left is lit all the way
+                    // across, one it has not reached yet is dark.
+                    const float vHead = (head - arc) / length;
+                    const bool ahead = back ? vHead >= 1.0f : vHead <= 0.0f;
                     arc += length;
 
                     const int bx0 = std::max(
                         clipX0,
-                        static_cast<int>(floorf(std::min(a.x, b.x) - circuitReach_)));
+                        static_cast<int>(floorf(std::min(a.x, b.x) - reach)));
                     const int bx1 = std::min(
                         clipX1,
-                        static_cast<int>(ceilf(std::max(a.x, b.x) + circuitReach_)));
+                        static_cast<int>(ceilf(std::max(a.x, b.x) + reach)));
                     const int by0 = std::max(
                         clipY0,
-                        static_cast<int>(floorf(std::min(a.y, b.y) - circuitReach_)));
+                        static_cast<int>(floorf(std::min(a.y, b.y) - reach)));
                     const int by1 = std::min(
                         clipY1,
-                        static_cast<int>(ceilf(std::max(a.y, b.y) + circuitReach_)));
+                        static_cast<int>(ceilf(std::max(a.y, b.y) + reach)));
                     if (bx1 <= bx0 || by1 <= by0) {
                         continue;
                     }
@@ -2329,62 +2442,131 @@ private:
                     const float inv = 1.0f / (length * length);
                     for (int y = by0; y < by1; y++) {
                         const float py = static_cast<float>(y) + 0.5f;
-                        for (int px = bx0; px < bx1; px++) {
-                            const float fx = static_cast<float>(px) + 0.5f;
-                            // Project onto the segment and clamp, which also gives
-                            // the runs round caps at their joints.
+                        const size_t at = static_cast<size_t>(y - clipY0) * layerW;
+                        uint8_t* covRow = covBase + at;
+                        uint8_t* heatRow = heatBase + at;
+                        uint8_t* tintRow = tintBase + at;
+                        for (int x = bx0; x < bx1; x++) {
+                            const float fx = static_cast<float>(x) + 0.5f;
+                            // Project onto the segment and clamp, which also
+                            // gives the runs round caps where they meet.
                             float v = ((fx - a.x) * dx + (py - a.y) * dy) * inv;
                             v = v < 0.0f ? 0.0f : (v > 1.0f ? 1.0f : v);
                             const float ox = fx - (a.x + dx * v);
                             const float oy = py - (a.y + dy * v);
-                            const float distance = sqrtf(ox * ox + oy * oy);
+                            // A wide track is the same cross section at a bigger
+                            // size, so the distance is measured against it.
+                            const float distance = sqrtf(ox * ox + oy * oy) / weight;
                             if (distance >= circuitReach_) {
                                 continue;
                             }
                             const int cell = std::min(
-                                static_cast<int>(distance * 4.0f), lutCount - 1);
-                            const float coverage = lut[cell];
-                            if (coverage <= 0.004f) {
+                                static_cast<int>(distance * kCircuitLutScale),
+                                lutCount - 1);
+                            const uint8_t coverage = lut[cell];
+                            const int lx = x - clipX0;
+                            if (coverage <= covRow[lx]) {
                                 continue;
                             }
-                            blendPixel(px, y, line, coverage,
-                                       lit + (g0 + (g1 - g0) * v) * peak);
+                            float heat = 0.0f;
+                            if (!ahead) {
+                                const float along =
+                                    (back ? vHead - v : v - vHead) * length;
+                                if (along < 0.0f) {
+                                    const int lookup = std::clamp(
+                                        static_cast<int>((along + tailSpan) * glowScale),
+                                        0, 255);
+                                    heat = glowLut[lookup] * heatScale;
+                                }
+                            }
+                            covRow[lx] = coverage;
+                            heatRow[lx] = static_cast<uint8_t>(
+                                Clamp01(heat) * 255.0f + 0.5f);
+                            tintRow[lx] = tintIndex;
                         }
                     }
                 }
+            }
 
-                // The via the run terminates in: a disc that flares as the current
-                // arrives and settles back to the standby glow with it.
-                if (trace.pad && !trace.path.empty()) {
-                    const CircuitNode& end = trace.path.back();
-                    // A reverse current arrives at the via first and lets it go,
-                    // so the pad flares as the run starts rather than as it ends.
-                    const float arrival =
-                        back ? head - trace.length : trace.length - head;
-                    const float current = lit + CircuitGlow(arrival, tail) * peak;
-                    const int px0 = std::max(
-                        clipX0, static_cast<int>(floorf(end.x - padRadius)));
-                    const int px1 = std::min(
-                        clipX1, static_cast<int>(ceilf(end.x + padRadius)));
-                    const int py0 = std::max(
-                        clipY0, static_cast<int>(floorf(end.y - padRadius)));
-                    const int py1 = std::min(
-                        clipY1, static_cast<int>(ceilf(end.y + padRadius)));
-                    for (int y = py0; y < py1; y++) {
-                        const float oy = static_cast<float>(y) + 0.5f - end.y;
-                        for (int px = px0; px < px1; px++) {
-                            const float ox = static_cast<float>(px) + 0.5f - end.x;
-                            const float distance = sqrtf(ox * ox + oy * oy);
-                            if (distance >= padRadius) {
-                                continue;
-                            }
-                            const float core =
-                                Clamp01(1.0f - distance / circuitThickness_);
-                            const float halo = Clamp01(1.0f - distance / padRadius);
-                            blendPixel(px, y, line,
-                                       std::min(1.0f, core + halo * halo * 0.35f),
-                                       current);
+            // One blend per pixel. The copper keeps its tint while it is only
+            // standing by and turns white where a charge is running through it.
+            workers_.ForRows(0, spanH, [&](int y) {
+                uint32_t* row = surface_.Row(clipY0 + y) + clipX0;
+                const size_t at = static_cast<size_t>(y) * layerW;
+                const uint8_t* covRow = covBase + at;
+                const uint8_t* heatRow = heatBase + at;
+                const uint8_t* tintRow = tintBase + at;
+                for (int x = 0; x < spanW; x++) {
+                    const uint8_t coverage = covRow[x];
+                    if (coverage == 0) {
+                        continue;
+                    }
+                    const float heat = heatRow[x] * (1.0f / 255.0f);
+                    const float alpha = coverage * (1.0f / 255.0f) *
+                                        (standby + heat * peak);
+                    if (alpha <= 0.002f) {
+                        continue;
+                    }
+                    const size_t tint = std::min<size_t>(tintRow[x], tints.size() - 1);
+                    const Color ink = Mix(tints[tint], white, Clamp01(heat * 1.35f));
+                    BlendOver(row[x], PackPremultiplied(ink, Clamp01(alpha)));
+                }
+            }, true, 16);
+
+            // The vias the runs finish in: a drilled pad that rings as the charge
+            // arrives and settles back to the standby glow with it.
+            for (size_t index = 0; index < circuitTraces_.size(); index++) {
+                const CircuitTrace& trace = circuitTraces_[index];
+                if (!trace.via || trace.path.empty()) {
+                    continue;
+                }
+                const float local = localOf(trace);
+                if (local <= 0.0f) {
+                    continue;
+                }
+                const CircuitNode& end = trace.path.back();
+                const float travelLen = local * (trace.length + tail);
+                const float head = back ? trace.length - travelLen : travelLen - tail;
+                // A reverse charge reaches the via first and lets it go, so the
+                // pad rings as the run starts rather than as it ends.
+                const float arrival = back ? head - trace.length : trace.length - head;
+                const float heat = Clamp01(CircuitGlow(arrival, tail) * heatScale);
+                const float alpha = standby + heat * peak * 1.15f;
+                if (alpha <= 0.002f) {
+                    continue;
+                }
+                const size_t tint = std::min<size_t>(index, tints.size() - 1);
+                const Color ink = Mix(tints[tint], white, Clamp01(heat * 1.35f));
+                const int px0 = std::max(
+                    clipX0, static_cast<int>(floorf(end.x - padRadius)));
+                const int px1 = std::min(
+                    clipX1, static_cast<int>(ceilf(end.x + padRadius)));
+                const int py0 = std::max(
+                    clipY0, static_cast<int>(floorf(end.y - padRadius)));
+                const int py1 = std::min(
+                    clipY1, static_cast<int>(ceilf(end.y + padRadius)));
+                for (int y = py0; y < py1; y++) {
+                    uint32_t* row = surface_.Row(y);
+                    const float oy = static_cast<float>(y) + 0.5f - end.y;
+                    for (int x = px0; x < px1; x++) {
+                        const float ox = static_cast<float>(x) + 0.5f - end.x;
+                        const float distance = sqrtf(ox * ox + oy * oy);
+                        if (distance >= padRadius) {
+                            continue;
                         }
+                        if (distance <= holeRadius) {
+                            // The drill through the middle of the pad, cut out of
+                            // the copper the run has already laid there.
+                            BlendOver(row[x],
+                                      PackPremultiplied(holeInk, 0.55f * envelope));
+                            continue;
+                        }
+                        const float q =
+                            (distance - holeRadius) / (padRadius - holeRadius);
+                        const float ring =
+                            q < 0.55f ? 1.0f : 1.0f - (q - 0.55f) * 1.6667f;
+                        BlendOver(row[x],
+                                  PackPremultiplied(ink, Clamp01(ring * alpha)));
                     }
                 }
             }
@@ -3140,11 +3322,18 @@ private:
     uint32_t bezelDrawnKeep_ = 255;
     int bezelLutBase_ = 0;
     std::vector<uint32_t> bezelLut_;
-    // Circuit trace: the runs of copper, the bands they occupy, and the distance
-    // table the line and its glow are drawn from.
+    // Circuit trace: the runs of copper, the bands they occupy, the cross
+    // section the line and its glow are drawn from, and the coverage, heat and
+    // tint scratch a band is collected into before it is blended once.
     std::vector<CircuitTrace> circuitTraces_;
     std::vector<RECT> circuitBands_;
-    std::vector<float> circuitFalloff_;
+    std::vector<uint8_t> circuitFalloff_;
+    std::vector<uint8_t> circuitCov_;
+    std::vector<uint8_t> circuitHeat_;
+    std::vector<uint8_t> circuitTint_;
+    int circuitLayerW_ = 0;
+    int circuitLayerH_ = 0;
+    static constexpr float kCircuitLutScale = 4.0f;
     float circuitThickness_ = 1.2f;
     float circuitReach_ = 7.0f;
     // Matrix code: the rasterised atlas of characters, the cell size it was cut
