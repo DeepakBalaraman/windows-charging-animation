@@ -23,6 +23,8 @@ The animation and the card are separate, and either one can be turned off. The s
 three groups (BackgroundEffect, Sounds and StatsPanel) plus a single Quiet mode switch at the bottom. Rows
 that your choices don't use hide themselves, so the list stays short.
 
+![Charging Animation in action](https://raw.githubusercontent.com/DeepakBalaraman/windows-charging-animation/main/assets/sample.gif)
+
 ## Background Effect
 
 `When plugged in` and `When unplugged` decide which events play anything at all. The rest of the section is
