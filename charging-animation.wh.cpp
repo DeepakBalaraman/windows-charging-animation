@@ -38,11 +38,14 @@ the pointer or `Cursor Position` to use the pointer itself.
 spot travels around them while it's up. Set the color to `rainbow` and the band becomes a gradient running
 around the screen; `Motion` sets how the spot speeds up and slows down.
 
-**Bezel** presses the screen in. A black frame grows out of all four edges and the desktop, captured once
-when the animation starts, is shrunk to fit inside it, so the whole picture slides inward instead of the
-edges being covered. It pushes in, holds, then lets go. Because the shrunk picture is a still image, the
-effect gives up after about two seconds whatever `Duration` says. `Strength` sets how deep the push goes,
-about 13 pixels at the default.
+**Bezel** presses the screen in. A dark frame grows out of all four edges, its inner lip catching a little
+light, and the desktop, captured once when the animation starts, is shrunk to fit inside it, so the whole
+picture slides inward instead of the edges being covered. Nothing on the picture is stretched: it shrinks
+by the same amount both ways, so the frame comes out a little thinner across the top and bottom. The
+picture sinks into the frame's shadow and creeps a little deeper as it settles, then holds and lets go.
+Because the shrunk picture is a still image, the effect gives up after about two seconds whatever `Duration`
+says. The frame is plain black and grey throughout, with no tint on it. `Strength` sets how far in it comes,
+about 16 pixels on the long edge at the default.
 
 **Circuit Trace** is the quiet one. Board traces fade in along the bottom of the screen, above the
 taskbar: a power rail runs the width of the monitor, risers drop off it, elbows turn up out of the bottom
@@ -2349,55 +2352,63 @@ private:
         }
     }
 
-    // The bezel presses the whole desktop inward: a flat frame grows out of the
+    // The bezel presses the whole desktop inward: a dark frame grows out of the
     // four edges and the screen, captured once before the window appears, is
     // scaled down to fit inside it. The depth stays small so the desktop reads as
     // nudged in rather than boxed.
     void BuildBezelProfile(int w, int h) {
-        const float cap = std::max(4.0f, std::min(w, h) * 0.06f);
-        bezelTarget_ = std::clamp((3.0f + style_.strength * 0.6f) * scale_, 2.0f, cap);
+        const float cap = std::max(4.0f, std::min(w, h) * 0.055f);
+        bezelTarget_ = std::clamp((4.0f + style_.strength * 0.75f) * scale_, 2.0f, cap);
         // The push steps in whole pixels, so the frames in between have nothing
         // to draw; -1 means "nothing on screen yet".
         bezelDrawnInset_ = -1;
-        bezelLutBase_ = static_cast<int>(ceilf(BezelShadowReach() * 3.0f)) * 4 + 4;
+        // The table starts at the far end of the shadow, out on the picture, and
+        // runs to a few pixels into the frame.
+        const float inside = BezelShadowReach() * kBezelShadowTail;
+        bezelLutBase_ = static_cast<int>(ceilf(inside * 4.0f)) + 4;
         bezelLut_.assign(static_cast<size_t>(bezelLutBase_ + 12), 0u);
     }
 
-    // How far the shadow under the frame falls onto the content. It stays short:
-    // the frame sits right on the desk, so it darkens only a sliver.
-    float BezelShadowReach() const { return std::max(2.0f, bezelTarget_ * 0.5f); }
+    // How far the shadow under the frame falls onto the content. The frame sits
+    // well in front of the picture rather than level with it, so the shadow
+    // travels a good deal further than the frame is deep.
+    float BezelShadowReach() const { return std::max(3.0f, bezelTarget_ * 2.0f); }
 
-    // The frame, its shadow and the fold are all a function of the distance to
-    // the inner edge, so the whole cross section fits in one lookup table.
-    void UpdateBezelFalloff(float amount, const Color& rim) {
-        const float presence = Clamp01(amount * 4.0f) * style_.opacity;
+    // The frame and its shadow are both a function of the distance to the inner
+    // edge, so the whole cross section fits in one lookup table. Negative is
+    // inside the pushed-in screen, positive is out on the frame.
+    void UpdateBezelFalloff(float amount) {
+        const float push = Clamp01(amount);
+        const float fade = push * push * (3.0f - 2.0f * push);
         const float reach = BezelShadowReach();
+        const float tail = reach * kBezelShadowTail;
+        const float opacity = Clamp01(style_.opacity);
         for (size_t i = 0; i < bezelLut_.size(); i++) {
-            // Negative inside the pushed-in screen, positive out on the frame.
             const float d =
                 (static_cast<float>(i) - static_cast<float>(bezelLutBase_)) * 0.25f;
-            const float frame = Clamp01(d + 0.5f) * presence;
-            float shadow = 0.0f;
-            float line = 0.0f;
+            // The frame is opaque from its first pixel on: it is a bezel, not a
+            // fade, and its thickness already grows out of nothing with the push.
+            const float frame = Clamp01(d + 0.5f) * opacity;
+            float shade = 0.0f;
             if (d < 0.0f) {
-                shadow = 0.34f * presence * expf(d / reach);
-                // A hairline where the content meets the frame: enough to show
-                // the fold, not enough to read as a lit border.
-                const float q = (d + 1.6f) / 1.1f;
-                line = 0.12f * presence * expf(-q * q);
+                // The picture, sitting under the frame: a dark contact line at
+                // the fold, then a long soft falloff spreading in from it.
+                const float contact = 0.46f * fade * expf(d / 1.7f);
+                const float spread = 0.26f * fade * expf(d / reach) *
+                                     Clamp01(1.0f + d / tail);
+                shade = Clamp01(contact + spread * (1.0f - contact));
             }
-            const float inside = 1.0f - frame;
-            const float alpha =
-                Clamp01(frame + inside * (line + shadow * (1.0f - line)));
-            const float rimAlpha = line * inside;
+            // The bezel body: near black, lifted a touch towards its inner edge,
+            // where its lip catches the glow coming off the screen. It is plain
+            // grey, so nothing coloured ever frames the picture.
+            const float body = 0.05f * expf(-std::max(0.0f, d) / 4.5f);
+            const float q = (d - 1.2f) / 0.75f;
+            const float lip = 0.22f * fade * expf(-q * q);
+            const float tone = Clamp01(body + lip) * frame;
+            const float alpha = Clamp01(frame + shade * (1.0f - frame));
             const uint32_t a = static_cast<uint32_t>(alpha * 255.0f + 0.5f);
-            const uint32_t r =
-                static_cast<uint32_t>(Clamp01(rim.r) * rimAlpha * 255.0f + 0.5f);
-            const uint32_t g =
-                static_cast<uint32_t>(Clamp01(rim.g) * rimAlpha * 255.0f + 0.5f);
-            const uint32_t b =
-                static_cast<uint32_t>(Clamp01(rim.b) * rimAlpha * 255.0f + 0.5f);
-            bezelLut_[i] = (a << 24) | (r << 16) | (g << 8) | b;
+            const uint32_t grey = static_cast<uint32_t>(tone * 255.0f + 0.5f);
+            bezelLut_[i] = (a << 24) | (grey << 16) | (grey << 8) | grey;
         }
     }
 
@@ -2418,68 +2429,85 @@ private:
 
         const float span = static_cast<float>(SpanMs());
         const float elapsed = static_cast<float>(now - start_);
-        // A short shove, a hold, then a quicker release, both eased at either end
-        // so the desktop slides in and settles instead of snapping.
-        const float pushMs = std::min(200.0f, span * 0.25f);
-        const float releaseMs = std::min(280.0f, span * 0.30f);
+        // A quick shove, a slow settle a little deeper, a hold, then the release.
+        // The settle is what gives the push its weight: the frame keeps creeping
+        // in for a moment after the first hit instead of stopping dead.
+        const float pressMs = std::min(210.0f, span * 0.22f);
+        const float settleMs = std::min(340.0f, span * 0.24f);
+        const float releaseMs = std::min(300.0f, span * 0.30f);
         auto ease = [](float x) {
             x = Clamp01(x);
             return x * x * (3.0f - 2.0f * x);
         };
         float amount;
-        if (elapsed < pushMs) {
-            amount = ease(elapsed / pushMs);
-        } else if (elapsed < span - releaseMs) {
+        float settle = 0.0f;
+        if (elapsed < pressMs) {
+            amount = ease(elapsed / pressMs);
+        } else if (elapsed < pressMs + settleMs) {
             amount = 1.0f;
+            settle = ease((elapsed - pressMs) / settleMs);
         } else {
-            amount = 1.0f - ease((elapsed - span + releaseMs) / releaseMs);
+            amount = elapsed < span - releaseMs
+                         ? 1.0f
+                         : 1.0f - ease((elapsed - span + releaseMs) / releaseMs);
+            settle = 1.0f;
         }
+        // The extra travel is kept to a couple of pixels: more than that and the
+        // frame reads as still sliding rather than coming to rest.
+        const float depth = bezelTarget_ * amount * (1.0f + 0.10f * settle);
 
         // The push steps in whole pixels, so while it holds nothing moves and
         // those frames cost nothing. The dim still has to track the fade, so the
         // frame is redrawn when that level moves as well.
         const uint32_t dimKeep = DimKeep(style_.dim * dimLevel_);
-        const int inset = static_cast<int>(bezelTarget_ * amount + 0.5f);
+        const int inset = static_cast<int>(depth + 0.5f);
         if (inset == bezelDrawnInset_ && dimKeep == bezelDrawnKeep_) {
             return;
         }
         bezelDrawnInset_ = inset;
         bezelDrawnKeep_ = dimKeep;
 
-        const int innerLeft = inset;
-        const int innerTop = inset;
-        const int innerRight = w - inset;   // Exclusive.
-        const int innerBottom = h - inset;  // Exclusive.
-        const float cx = static_cast<float>(w) * 0.5f;
-        const float cy = static_cast<float>(h) * 0.5f;
-        const float hx = cx - static_cast<float>(inset);
-        const float hy = cy - static_cast<float>(inset);
+        // The picture is zoomed out by the same factor on both axes, so nothing
+        // inside it changes shape. Insetting it by the same number of pixels on
+        // all four sides would stretch it: the screen is wider than it is tall,
+        // so the band comes out a little thinner at the top and the bottom.
+        const float longest = static_cast<float>(std::max(w, h));
+        const float zoom = 1.0f - 2.0f * static_cast<float>(inset) / longest;
+        const int innerW =
+            std::max(1, static_cast<int>(static_cast<float>(w) * zoom + 0.5f));
+        const int innerH =
+            std::max(1, static_cast<int>(static_cast<float>(h) * zoom + 0.5f));
+        const int innerLeft = (w - innerW) / 2;
+        const int innerTop = (h - innerH) / 2;
+        const int innerRight = innerLeft + innerW;   // Exclusive.
+        const int innerBottom = innerTop + innerH;   // Exclusive.
         const int lastY = h - 1;
+        // Distance to the frame, measured off the four inner edges.
+        const float leftEdge = static_cast<float>(innerLeft);
+        const float topEdge = static_cast<float>(innerTop);
+        const float rightEdge = static_cast<float>(innerRight);
+        const float bottomEdge = static_cast<float>(innerBottom);
 
-        UpdateBezelFalloff(amount, g_glow.rainbow ? g_glow.At(0.18f) : g_glow.color);
+        UpdateBezelFalloff(amount);
 
         const uint32_t* lut = bezelLut_.data();
         const int lutCount = static_cast<int>(bezelLut_.size());
         const float base = static_cast<float>(bezelLutBase_);
         // Anything further in than this is untouched by the frame.
-        const int band =
-            inset + static_cast<int>(ceilf(BezelShadowReach() * 3.0f)) + 2;
+        const int band = std::max(innerLeft, innerTop) +
+                         static_cast<int>(ceilf(BezelShadowReach() * kBezelShadowTail)) +
+                         2;
 
         // The screen is scaled, not cropped: every captured pixel is resampled
         // into the smaller rect, so the whole picture slides inward together
-        // instead of the edges vanishing under a mask.
+        // instead of the edges vanishing under a mask. Both axes share one
+        // factor, which is what keeps the picture's own shape intact.
         const Surface& shot = bezelCapture_;
         const bool pushed = shot.Valid() && shot.Width() > 0 && shot.Height() > 0;
         const OpaquePixels image{pushed ? shot.Row(0) : nullptr, shot.Width(),
                                  shot.Height(), shot.Stride()};
-        const float scaleX =
-            pushed ? static_cast<float>(shot.Width()) /
-                         static_cast<float>(std::max(1, innerRight - innerLeft))
-                   : 1.0f;
-        const float scaleY =
-            pushed ? static_cast<float>(shot.Height()) /
-                         static_cast<float>(std::max(1, innerBottom - innerTop))
-                   : 1.0f;
+        const float resample =
+            static_cast<float>(w) / static_cast<float>(std::max(1, innerW));
         const uint32_t dim =
             static_cast<uint32_t>(Clamp01(style_.opacity) * 255.0f + 0.5f);
 
@@ -2495,10 +2523,10 @@ private:
                            static_cast<size_t>(w - innerRight) * 4);
                 }
                 const float sy =
-                    (static_cast<float>(y - innerTop) + 0.5f) * scaleY - 0.5f;
+                    (static_cast<float>(y - innerTop) + 0.5f) * resample - 0.5f;
                 for (int x = innerLeft; x < innerRight; x++) {
                     const float sx =
-                        (static_cast<float>(x - innerLeft) + 0.5f) * scaleX - 0.5f;
+                        (static_cast<float>(x - innerLeft) + 0.5f) * resample - 0.5f;
                     uint32_t pixel = SampleOpaquePixels(image, sx, sy);
                     if (dimKeep < 255u) {
                         pixel = DimPixel(pixel, dimKeep);
@@ -2515,9 +2543,10 @@ private:
                 for (int x = from; x < to; x++) {
                     // Straight-edged distance to the nearest of the four inner
                     // edges: negative over the pushed-in content.
-                    const float d =
-                        std::max(fabsf(static_cast<float>(x) + 0.5f - cx) - hx,
-                                 fabsf(py - cy) - hy);
+                    const float px = static_cast<float>(x) + 0.5f;
+                    const float d = std::max(
+                        std::max(leftEdge - px, px - rightEdge),
+                        std::max(topEdge - py, py - bottomEdge));
                     const int index = std::clamp(
                         static_cast<int>(d * 4.0f + base), 0, lutCount - 1);
                     BlendOver(row[x], lut[index]);
@@ -2778,12 +2807,14 @@ private:
     std::vector<float> glowLut_;
     float band_ = 0;
     int bandPx_ = 0;
-    // Black bezel: the snapshot that gets scaled into the smaller rect, how deep
+    // Dark bezel: the snapshot that gets scaled into the smaller rect, how deep
     // the push goes, and the cross section of frame, shadow and fold by distance
     // from the inner edge.
     Surface bezelCapture_;
     float bezelTarget_ = 0;
     int bezelDrawnInset_ = -1;
+    // How far the frame's shadow spreads, as a multiple of its own depth.
+    static constexpr float kBezelShadowTail = 2.6f;
     // The dim the picture on screen was drawn with, so a fade step that lands
     // while the push is holding still redraws the frame.
     uint32_t bezelDrawnKeep_ = 255;
