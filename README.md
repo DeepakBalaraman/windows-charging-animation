@@ -150,9 +150,12 @@ Quiet mode asks Windows whether now is a good time for a notification. While a f
 ## Notes and limits
 
 - Everything happens on the monitor the pointer is on. `Cursor Position` follows the pointer itself, and the other origin spots are on that monitor.
-- A change of resolution, display scaling or monitor setup stops a running animation instead of letting it draw in the wrong place. The next power event starts fresh.
+- A change of resolution, or a monitor being added or removed, stops a running animation instead of letting it draw in the wrong place. The next power event starts fresh. A change of display scaling alone does not stop it.
+- While Bezel runs, the monitor keeps showing the still picture it started with, so anything moving on screen looks frozen for its two seconds. Clicks still reach the real windows underneath.
+- On a locked screen or during the screen saver the sound still plays, but the animation and the card are skipped, since nobody would see them.
 - If the machine is slow enough that frames start taking too long, the two wave effects render at a coarser pixel step until the load passes, so the motion stays smooth instead of stuttering.
 - Some full-screen protected video comes back black when the desktop is captured. The effects that do not capture anything, Edge Glow, Circuit Trace and Matrix Code, always draw normally.
+- This mod does not replace the Charging Sound mod, which only plays a sound. Installing both is fine, but if each one is set to play on the same event, you will hear two sounds.
 
 ## Troubleshooting
 
@@ -164,7 +167,7 @@ Quiet mode asks Windows whether now is a good time for a notification. While a f
 
 ## Credits
 
-The wave effect is inspired by the [Magic Pointer mod](https://windhawk.net/mods/magic-pointer). The layered window handling, the drawing surface and the rasterising helpers started from that code and were adapted for this one.
+The wave effect is inspired by the [Magic Pointer mod](https://windhawk.net/mods/magic-pointer). The layered window handling, the drawing surface and the rasterising helpers started from that code and were adapted for this one. The power notification window and the thread that owns it come from the [Charging Sound mod](https://windhawk.net/mods/charging-sound), which is also MIT.
 
 ## License
 
