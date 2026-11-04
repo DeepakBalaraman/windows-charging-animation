@@ -123,7 +123,7 @@ level bar that fills from empty as the card slides in and turns red below 20% wh
 **Fluent (Minimal)** is the same card at badge size, with half the padding, a smaller number, no status
 line and a thinner bar.
 
-**PineApple (Desktop)** is the plain system HUD: a rounded square, as wide as it is tall, black in dark mode
+**PineApple (Card)** is the plain system HUD: a rounded square, as wide as it is tall, black in dark mode
 and white in light mode, with a large battery icon on top, the percentage below it, the status line under that
 and a full-width capsule bar along the bottom. The accent color isn't used anywhere in it, and the icon and
 the bar turn red when the battery runs low. It fades and pops in quickly instead of sliding; `Center` is the
@@ -134,13 +134,15 @@ twice the normal size, with a bolt in a round tinted badge next to it, the statu
 thin bar running the full width along the bottom edge. On an unplug the badge shows a battery instead of
 the bolt. The surface is nearly opaque, so the desktop behind only tints it.
 
-**PineApple (Phone Style)** is the phone charging screen: a thick ring that fills clockwise to the battery
+**PineApple (Circle)** is the phone charging screen: a thick ring that fills clockwise to the battery
 level, a bolt and the percentage in the middle, and the status line on a small frosted pill underneath.
-Nothing is drawn behind the ring, so it floats over whatever is open, and the number and the bolt carry a
-soft shadow that keeps them readable on a bright background. It springs in with a small overshoot, sweeps
-the ring once, and shrinks away when it closes.
+The middle of the dial is a soft patch of the blurred desktop, so the number sits on a little frost
+instead of bare wallpaper, and the patch fades away before it reaches the ring, which keeps the dial
+floating instead of turning it into a card. The number and the bolt also carry a soft shadow that keeps
+them readable on a bright background. It springs in with a small overshoot, sweeps the ring once, and
+shrinks away when it closes.
 
-The Fluent and Galaxy cards follow the Windows app theme; the PineApple desktop card flips between black and
+The Fluent and Galaxy cards follow the Windows app theme; the PineApple card flips between black and
 white with it, so it stays readable on either wallpaper. All five update once a second and fade out at the
 end.
 
@@ -148,7 +150,7 @@ end.
 where the animation started, and the other choices are the corners, the edges, `Center` and the cursor. It
 always stays inside the working area, so the taskbar isn't covered. `Accent color` sets the tint, with
 `Match Effect Color` taking the color from the event that brought the card up (the gradient included) and
-`Custom` reading the field below it in any of the formats above; the PineApple desktop card has no tint to
+`Custom` reading the field below it in any of the formats above; the PineApple card has no tint to
 give it, so it ignores this one. Turning `Details` off drops the status line, and `Duration`, `Opacity` and
 `Font size` tune the rest.
 
@@ -295,13 +297,13 @@ and the card.
     $description: "Show the panel with the battery level and charging status when the charger is disconnected."
   - Style: fluent
     $name: Style
-    $description: "Fluent is the Windows 11 acrylic card, Fluent Minimal the badge-sized version, PineApple (Desktop) a plain black or white HUD slab, Galaxy UI a wide soft card with a bolt badge beside the percentage, and PineApple the phone charging ring with a caption pill."
+    $description: "Fluent is the Windows 11 acrylic card, Fluent Minimal the badge-sized version, PineApple (Card) a plain black or white HUD slab, Galaxy UI a wide soft card with a bolt badge beside the percentage, and PineApple (Circle) the phone charging ring with a caption pill."
     $options:
       - fluent: Fluent (Windows 11-ish)
       - minimal: Fluent (Minimal)
-      - osd: PineApple (Desktop)
+      - osd: PineApple (Card)
       - galaxy: Galaxy UI
-      - pineapple: PineApple (Phone Style)
+      - pineapple: PineApple (Circle)
   - Position: ripple
     $name: Position
     $description: "Where the panel appears. Follow Effect puts it where the animation started. It stays inside the working area, so the taskbar is never covered."
@@ -3984,6 +3986,53 @@ void FillGlass(Surface& surface, const RoundedRect& rect, const Surface& backdro
     }
 }
 
+// A round patch of the blurred capture, darkened into glass and feathered out
+// to nothing at the rim. The soft edge is the point: it gives a floating HUD
+// something to lay a number on without a panel outline showing up.
+void FillFrostDisc(Surface& surface, float cx, float cy, float radius,
+                   const Surface& backdrop, const Color& scrim,
+                   float scrimAlpha, float alpha) {
+    if (!surface.Valid() || radius <= 0.5f || alpha <= 0.0f) {
+        return;
+    }
+    const int firstY = std::max(0, static_cast<int>(floorf(cy - radius)));
+    const int lastY =
+        std::min(surface.Height(), static_cast<int>(ceilf(cy + radius)) + 1);
+    const int firstX = std::max(0, static_cast<int>(floorf(cx - radius)));
+    const int lastX =
+        std::min(surface.Width(), static_cast<int>(ceilf(cx + radius)) + 1);
+    const float invRadius = 1.0f / radius;
+    for (int y = firstY; y < lastY; y++) {
+        uint32_t* row = surface.Row(y);
+        const uint32_t* imageRow = backdrop.Valid() && y < backdrop.Height()
+                                       ? backdrop.Row(y)
+                                       : nullptr;
+        const float dy = static_cast<float>(y) + 0.5f - cy;
+        for (int x = firstX; x < lastX; x++) {
+            const float dx = static_cast<float>(x) + 0.5f - cx;
+            const float distance = sqrtf(dx * dx + dy * dy) * invRadius;
+            if (distance >= 1.0f) {
+                continue;
+            }
+            // Full strength over the middle and feathered away over the outer
+            // third, so the patch has a soft rim instead of a vignette that
+            // keeps fading from the centre out.
+            const float kCore = 0.62f;
+            const float edge = Clamp01((1.0f - distance) / (1.0f - kCore));
+            const float fade = edge * edge * (3.0f - 2.0f * edge);
+            Color pixel = scrim;
+            if (imageRow && x < backdrop.Width()) {
+                const uint32_t p = imageRow[x];
+                pixel = Mix(Rgb(static_cast<int>((p >> 16) & 0xFFu),
+                                static_cast<int>((p >> 8) & 0xFFu),
+                                static_cast<int>(p & 0xFFu)),
+                            scrim, scrimAlpha);
+            }
+            BlendOver(row[x], PackPremultiplied(pixel, alpha * fade));
+        }
+    }
+}
+
 // Windows 11 themes its surfaces from the personalisation settings, so the card
 // follows the app theme instead of forcing its own.
 struct OverlayTheme {
@@ -4072,7 +4121,7 @@ public:
         }
         // The frosted backdrop is grabbed while the card is still hidden, or the
         // capture would contain the previous card and smear it into the blur.
-        // The plain PineApple desktop slab never needs it.
+        // The plain PineApple card never needs it.
         if (!wasVisible && UsesBackdrop() && CaptureBackdrop()) {
             Refresh();
         }
@@ -4377,8 +4426,8 @@ private:
         scale_ = DpiScaleAt(rippleOrigin_);
         const bool galaxy = KeyIs(style_.theme, L"galaxy");
         springy_ = KeyIs(style_.theme, L"pineapple");
-        // The Galaxy card and the PineApple desktop HUD are system HUDs, so they
-        // fade and scale in instead of sliding like the Fluent cards.
+        // The Galaxy and PineApple cards are system HUDs, so they fade and scale
+        // in instead of sliding like the Fluent cards.
         hud_ = KeyIs(style_.theme, L"osd") || galaxy;
         if (springy_) {
             return RefreshPineApple(stats, title, detail);
@@ -4615,7 +4664,7 @@ private:
 
     // PineApple: the phone charging indicator. A progress ring fills clockwise
     // up to the battery level around the percentage and a bolt, with the caption
-    // on a frosted pill underneath and nothing else behind them.
+    // on a frosted pill underneath and a soft disc of blur behind the number.
     bool RefreshPineApple(const ChargingStats& stats, const std::wstring& title,
                           const std::wstring& detail) {
         const float s = scale_;
@@ -4676,9 +4725,11 @@ private:
         // The bolt and the percentage share the middle of the ring.
         const float groupH = boltH + boltGap + glyphH;
 
-        // No panel behind the dial: the ring floats on the desktop and only the
-        // caption gets a pill, so the supporting line stays readable over any
-        // wallpaper without a card wrapping the whole HUD.
+        // No panel behind the dial: the ring floats on the desktop and the
+        // supporting line gets a pill, so the caption reads over any wallpaper
+        // without a card wrapping the whole HUD. The number gets a soft frosted
+        // patch of its own, and because that patch has no edge it still reads
+        // as floating glass rather than a tile.
         const int captionW = detail.empty() ? 0 : static_cast<int>(capSize.cx);
         // The pill is cut for the reserved width, but the caption is centred on
         // the width it really has, so a short line sits in the middle of it.
@@ -4726,7 +4777,15 @@ private:
 
         surface_.Clear();
 
-        // The caption pill is the only frosted piece: the blurred capture under a
+        // A disc of that same blur behind the number, stopped short of the ring
+        // so the two never touch and the arc keeps the wallpaper on both sides
+        // of it. It is mixed well toward black, which is what holds the white
+        // digits over a bright photo.
+        const float lensRadius = std::max(thickness, radius - thickness * 1.4f);
+        FillFrostDisc(surface_, ringCx_, ringCy_, lensRadius, backdrop_,
+                      Rgb(8, 8, 10), 0.58f, 0.62f);
+
+        // The caption pill is the other frosted piece: the blurred capture under a
         // dark scrim plus a wash of the accent, so the line reads over anything.
         const int pillTop = shadow + ringBox + gap;
         if (!detail.empty()) {
@@ -4756,8 +4815,9 @@ private:
         if (charging) {
             const float boltX = ringCx_ - boltW * 0.5f;
             const float boltY = ringCy_ - groupH * 0.5f;
-            // With nothing painted behind it, the bolt would dissolve into a white
-            // window or a bright photo, so a dark copy sits just under the lit one.
+            // The frost behind it is only a soft wash over the wallpaper, so a
+            // dark copy sits just under the lit bolt to hold its edges against a
+            // bright window.
             FillBolt(surface_, boltX, boltY + std::max(1.0f, 2.0f * s), boltW, boltH,
                      Rgb(0, 0, 0), 0.38f);
             FillBolt(surface_, boltX, boltY, boltW, boltH, Rgb(255, 255, 255), 0.96f);
@@ -4770,8 +4830,9 @@ private:
                  title.c_str(), static_cast<int>(title.size()));
         GdiFlush();
         SelectObject(dc, previous);
-        // Three shadow passes stand in for the panel the number used to sit on: a
-        // dark halo that keeps the white legible over bright wallpaper.
+        // The frost is a wash rather than a panel, so the number still carries a
+        // dark halo of its own: three passes that keep the white legible over
+        // bright wallpaper.
         const int shade = std::max(1, static_cast<int>(1.5f * s + 0.5f));
         CompositeText(Rgb(0, 0, 0, 0.38f), -shade, shade);
         CompositeText(Rgb(0, 0, 0, 0.38f), shade, shade);
@@ -4803,7 +4864,7 @@ private:
         return PlaceOnScreen(cardW, cardH);
     }
 
-    // PineApple (Desktop): the charging HUD the way a desktop OS draws one. A
+    // PineApple (Card): the charging HUD the way a desktop OS draws one. A
     // plain black slab in dark mode, a plain white one in light mode, with the
     // glyph and the number in one centred column over a capsule bar. No accent
     // tint and no frost behind it, which is the point of the style.
@@ -5257,8 +5318,8 @@ private:
     Surface backdrop_;
     Surface scaled_;
     bool springy_ = false;
-    // The HUD themes, the PineApple desktop slab and the Galaxy card, fade and
-    // scale instead of sliding.
+    // The HUD themes, the PineApple card and the Galaxy card, fade and scale
+    // instead of sliding.
     bool hud_ = false;
     bool ringReady_ = false;
     float ringCx_ = 0.0f;
