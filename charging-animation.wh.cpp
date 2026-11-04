@@ -28,7 +28,7 @@ that your choices don't use hide themselves, so the list stays short.
 `When plugged in` and `When unplugged` decide which events play anything at all. The rest of the section is
 shared by both, apart from the two colors and the unplug direction. The sounds have a section of their own.
 
-There are four looks. `Animation` picks the one you want.
+There are five looks. `Animation` picks the one you want.
 
 **Wave** is the default. It takes a picture of the desktop and bends it outward along an expanding ring,
 tinted with the event color. `Origin` moves where it starts, either one of nine spots on the screen under
@@ -53,6 +53,15 @@ corners. A pulse runs along each trace in turn, lighting its end as it arrives, 
 out. Nothing is captured from the desktop. `Strength` sets how thick the traces are and how far their glow
 spills, and the layout is different on every event.
 
+**Matrix Code** is the busy one. Columns of characters drop down the screen, each a bright head over a
+trail that dims as it falls, and some cells in a trail stay dark, which is what turns a solid bar into a
+stream of characters. The head of every column keeps flickering to a new character while it travels, and
+the columns are let go from the `Origin` outward, so the cascade spreads across the monitor in one sweep.
+The characters are the event color, with the head of each column close to white, and on `rainbow` the
+columns take different points of the gradient. Nothing is captured from the desktop. `Strength` sets how
+long the trails are. Like the bezel it is a burst rather than a slow move, so it gives up after about two
+seconds whatever `Duration` says.
+
 **Colors.** `Plugged-in color` and `Unplugged color` each tint their own event. Pick one from the list, or
 choose Custom and type into the field that appears underneath. On Windhawk 2.0 that field is a color
 picker. These all work:
@@ -70,9 +79,10 @@ A name that isn't recognized falls back to the event default, blue for plugging 
 so a typo doesn't break anything.
 
 **Strength, Duration, Motion and Opacity** control the size and the timing. `Strength` (0-40) is how far
-the desktop bends, how wide the light band is, how deep the push goes, how thick the traces are; at 0 the
-wave keeps only its glow. `Duration` (300-5000 ms) is how long the animation runs, `Opacity` (0-100) fades
-all of it, and `Motion` picks the easing used by Wave and Edge Glow.
+the desktop bends, how wide the light band is, how deep the push goes, how thick the traces are, how long
+the cascade trails; at 0 the wave keeps only its glow. `Duration` (300-5000 ms) is how long the animation
+runs, though the bezel and the cascade stop well before it, `Opacity` (0-100) fades all of it, and `Motion`
+picks the easing used by Wave and Edge Glow.
 
 **Dim screen** darkens the monitor the animation plays on, the way a phone dims its display when it starts
 charging. It fades in over the first quarter second, stays down for the length of the animation and fades
@@ -156,6 +166,7 @@ and the card.
       - edgeglow: Edge Glow (Neon Border)
       - bezel: Bezel (Screen Push)
       - circuit: Circuit Trace (PCB Glow)
+      - matrix: Matrix Code (Character Rain)
   - PluggedInColor: accent
     $name: Plugged-in color
     $description: "Color of the animation when the charger is connected. Choose Custom to use the color below."
@@ -215,8 +226,8 @@ and the card.
       - reverse: Reverse (Collapse)
   - Origin: bottom
     $name: Origin
-    $description: "Where the wave starts on the monitor under the cursor. Cursor Position follows the pointer itself."
-    #! $showIf: {Animation: ripple}
+    $description: "Where the animation starts on the monitor under the cursor. Wave starts here, and the cascade is released from here outward. Cursor Position follows the pointer itself."
+    #! $showIf: {Animation: [ripple, matrix]}
     $options:
       - topleft: Top Left
       - top: Top
@@ -230,12 +241,12 @@ and the card.
       - cursor: Cursor Position
   - Strength: 16
     $name: Strength
-    $description: "How far the effect reaches: wave displacement, glow band width, push depth or trace thickness. Lower values are gentler."
+    $description: "How far the effect reaches: wave displacement, glow band width, push depth, trace thickness or how long the cascade trails behind its head. Lower values are gentler."
     #! $min: 0
     #! $max: 40
   - Duration: 1650
     $name: Duration (ms)
-    $description: "How long the animation runs. The bezel lets go after about two seconds whatever this says."
+    $description: "How long the animation runs. The bezel and the cascade let go early whatever this says."
     #! $min: 300
     #! $max: 5000
   - Motion: smooth
@@ -379,6 +390,14 @@ constexpr UINT WM_APP_RIPPLE = WM_APP + 10;
 constexpr UINT WM_APP_STATS = WM_APP + 11;
 constexpr float kPi = 3.14159265358979f;
 constexpr double kFrameMs = 1000.0 / 60.0;
+// The matrix cascade repaints the whole monitor, so it takes a slightly slower
+// clock than the effects that only touch a band of it.
+constexpr double kMatrixFrameMs = 1000.0 / 50.0;
+
+// The cascade draws printable ASCII, the one range every font on the machine
+// is certain to have, so no cell can come out as a missing-glyph box.
+constexpr wchar_t kMatrixFirstChar = L'!';
+constexpr wchar_t kMatrixLastChar = L'~';
 
 #ifndef CREATE_WAITABLE_TIMER_HIGH_RESOLUTION
 #define CREATE_WAITABLE_TIMER_HIGH_RESOLUTION 0x00000002
@@ -1459,13 +1478,15 @@ float RoundedRectSdf(float px, float py, const RoundedRect& rect) {
 
 // The scene effects. The ripple refracts the captured desktop along an
 // expanding wave, the edge glow paints a neon band that hugs the border, the
-// bezel presses the whole desktop inward inside a flat frame, and the circuit
-// trace wakes up a board's routing along the taskbar and in the corners.
+// bezel presses the whole desktop inward inside a flat frame, the circuit
+// trace wakes up a board's routing along the taskbar and in the corners, and
+// the matrix rains characters down the screen in columns.
 enum class RippleEffect {
     Ripple,
     EdgeGlow,
     Bezel,
     Circuit,
+    Matrix,
 };
 
 RippleEffect ParseRippleEffect(std::wstring text) {
@@ -1476,6 +1497,7 @@ RippleEffect ParseRippleEffect(std::wstring text) {
     if (text == L"edgeglow") return RippleEffect::EdgeGlow;
     if (text == L"bezel") return RippleEffect::Bezel;
     if (text == L"circuit") return RippleEffect::Circuit;
+    if (text == L"matrix") return RippleEffect::Matrix;
     return RippleEffect::Ripple;
 }
 
@@ -1650,6 +1672,9 @@ public:
         circuitTraces_.clear();
         circuitBands_.clear();
         circuitFalloff_.clear();
+        matrixColumns_.clear();
+        matrixAtlas_.Reset();
+        matrixGlyphs_ = 0;
     }
 
     bool Active() const { return active_; }
@@ -1743,6 +1768,9 @@ private:
             case RippleEffect::Circuit:
                 RenderCircuit(now);
                 break;
+            case RippleEffect::Matrix:
+                RenderMatrix(now);
+                break;
             default:
                 RenderRipple(now);
                 break;
@@ -1819,10 +1847,14 @@ private:
             }
         } else if (style_.effect == RippleEffect::Circuit) {
             BuildCircuitProfile(w, h);
+        } else if (style_.effect == RippleEffect::Matrix) {
+            BuildMatrixProfile(w, h);
         } else {
             BuildGlowProfile(w, h);
         }
-        frameMs_ = kFrameMs;
+        // The cascade rewrites the whole monitor every frame, so it runs a
+        // little under the usual rate: falling glyphs do not need 60 of them.
+        frameMs_ = style_.effect == RippleEffect::Matrix ? kMatrixFrameMs : kFrameMs;
         start_ = NowMs();
         active_ = true;
         Render(start_);
@@ -2352,6 +2384,240 @@ private:
         }
     }
 
+    // One column of the cascade: where it sits, how far its head has fallen, how
+    // long its trail is and when the sweep out of the origin releases it.
+    struct MatrixColumn {
+        int left = 0;        // first pixel column it owns
+        float head = 0.0f;   // where the head starts, in cells above the top
+        float speed = 0.0f;  // cells per second
+        float trail = 0.0f;  // cells lit behind the head
+        float delay = 0.0f;  // seconds before the sweep reaches it
+        float hue = 0.0f;    // where it samples the palette
+        uint32_t blank = 0;  // how readily its cells go dark, 0-255
+    };
+
+    // A cheap integer hash. The character in a cell and whether that cell is
+    // dark both come out of it, so the glyphs stay put while the trail moves
+    // over them.
+    static uint32_t MatrixHash(uint32_t a, uint32_t b) {
+        uint32_t v = (a * 0x9E3779B9u) ^ (b * 0x85EBCA6Bu) ^ 0x27D4EB2Fu;
+        v ^= v >> 15;
+        v *= 0x2545F491u;
+        v ^= v >> 13;
+        return v;
+    }
+
+    // The cascade: a screen-wide grid of character cells, one column per cell,
+    // each with its own head, speed and trail. Drawing text every frame would be
+    // far too slow, so the characters are rasterised once into an atlas and a
+    // frame only copies their coverage out of it.
+    void BuildMatrixProfile(int w, int h) {
+        matrixColumns_.clear();
+        matrixAtlas_.Reset();
+        matrixCellW_ = 0;
+        matrixCellH_ = 0;
+        matrixGlyphs_ = 0;
+
+        const int fontPx = std::max(9, static_cast<int>(14.0f * scale_ + 0.5f));
+        const int cellH = std::max(
+            8, static_cast<int>(static_cast<float>(fontPx) * 1.34f + 0.5f));
+        const int cellW = std::max(
+            6, static_cast<int>(static_cast<float>(fontPx) * 0.64f + 0.5f));
+        const int glyphs = static_cast<int>(kMatrixLastChar - kMatrixFirstChar) + 1;
+        if (!matrixAtlas_.Resize(cellW * glyphs, cellH)) {
+            return;
+        }
+
+        HFONT font = CreateFontW(-fontPx, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
+                                 DEFAULT_CHARSET, OUT_TT_PRECIS, CLIP_DEFAULT_PRECIS,
+                                 ANTIALIASED_QUALITY, FIXED_PITCH | FF_MODERN,
+                                 L"Consolas");
+        if (!font) {
+            matrixAtlas_.Reset();
+            return;
+        }
+        HDC dc = matrixAtlas_.Dc();
+        HGDIOBJ previous = SelectObject(dc, font);
+        SetBkMode(dc, TRANSPARENT);
+        SetTextColor(dc, RGB(255, 255, 255));
+        matrixAtlas_.Clear();
+        for (int i = 0; i < glyphs; i++) {
+            const wchar_t glyph[2] = {static_cast<wchar_t>(kMatrixFirstChar + i), 0};
+            RECT cell{i * cellW, 0, (i + 1) * cellW, cellH};
+            DrawTextW(dc, glyph, 1, &cell,
+                      DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
+        }
+        GdiFlush();
+        SelectObject(dc, previous);
+        DeleteObject(font);
+
+        // GDI text carries no alpha, so the brightness of a pixel becomes its
+        // coverage: one byte that any colour and any strength multiply later.
+        for (int y = 0; y < cellH; y++) {
+            uint32_t* row = matrixAtlas_.Row(y);
+            for (int x = 0; x < cellW * glyphs; x++) {
+                const uint32_t pixel = row[x];
+                const uint32_t coverage = std::max(
+                    {(pixel >> 16) & 0xFFu, (pixel >> 8) & 0xFFu, pixel & 0xFFu});
+                row[x] = (coverage << 24) | (coverage << 16) | (coverage << 8) |
+                         coverage;
+            }
+        }
+
+        matrixCellW_ = cellW;
+        matrixCellH_ = cellH;
+        matrixGlyphs_ = glyphs;
+
+        const float span = static_cast<float>(SpanMs());
+        const int rows = std::max(1, (h + cellH - 1) / cellH);
+        const int cols = std::max(1, (w + cellW - 1) / cellW);
+        // The sweep releases the columns from the origin outward, so a head only
+        // has the rest of the span to fall past the bottom edge.
+        const float sweepMs = std::min(420.0f, span * 0.30f);
+        const float fallMs = std::max(240.0f, span * 0.85f - sweepMs);
+        const float trailCells =
+            std::clamp(5.0f + style_.strength * 0.75f, 5.0f, static_cast<float>(rows));
+        // A screen a second is about as fast as an eye can follow a character.
+        const float travel =
+            std::min(60.0f, (static_cast<float>(rows) + trailCells) / (fallMs * 0.001f));
+
+        matrixColumns_.resize(static_cast<size_t>(cols));
+        uint32_t seed = 0x243F6A88u;
+        auto next = [&seed]() {
+            seed = seed * 1664525u + 1013904223u;
+            return static_cast<float>((seed >> 9) & 0x7FFFu) / 32767.0f;
+        };
+        const float halfWidth = std::max(1.0f, static_cast<float>(w) * 0.5f);
+        for (int i = 0; i < cols; i++) {
+            MatrixColumn& column = matrixColumns_[static_cast<size_t>(i)];
+            column.left = i * cellW;
+            column.trail = trailCells * (0.55f + 0.85f * next());
+            column.speed = travel * (0.70f + 0.60f * next());
+            // Every head starts above the screen, so the columns enter it rather
+            // than blinking into place.
+            column.head = -column.trail * (0.4f + next());
+            const float sideways =
+                fabsf(static_cast<float>(column.left) - center_.x) / halfWidth;
+            column.delay = Clamp01(sideways) * sweepMs * 0.001f;
+            column.hue = next();
+            column.blank = static_cast<uint32_t>(18.0f + 46.0f * next());
+        }
+    }
+
+    // The cascade itself: characters falling in columns, let go from the origin
+    // outward and fading away. Nothing is captured from the desktop, so it costs
+    // nothing to start and nothing lingers once it is over.
+    void RenderMatrix(double now) {
+        const int w = surface_.Width();
+        const int h = surface_.Height();
+        const int cellW = matrixCellW_;
+        const int cellH = matrixCellH_;
+        if (w <= 0 || h <= 0 || cellW <= 0 || cellH <= 0 || matrixGlyphs_ <= 0 ||
+            matrixColumns_.empty() || !matrixAtlas_.Valid()) {
+            return;
+        }
+
+        const float span = static_cast<float>(SpanMs());
+        const float elapsed = static_cast<float>(now - start_);
+        // It arrives in a blink and lets go over the tail, so the desktop comes
+        // back gradually instead of snapping on.
+        const float inMs = std::min(110.0f, span * 0.20f);
+        const float outMs = std::min(span * 0.40f, 620.0f);
+        float envelope = 1.0f;
+        if (elapsed < inMs) {
+            const float q = Clamp01(elapsed / inMs);
+            envelope = q * q * (3.0f - 2.0f * q);
+        } else if (elapsed > span - outMs) {
+            const float q = Clamp01((elapsed - span + outMs) / outMs);
+            envelope = 1.0f - q * q * (3.0f - 2.0f * q);
+        }
+        const float gain = envelope * Clamp01(style_.opacity);
+
+        // The columns cover the screen, so every frame is the whole monitor: it
+        // is cleared and rebuilt rather than patched in strips.
+        surface_.Clear();
+        if (gain <= 0.0f) {
+            window_.Present(surface_, monitor_.left, monitor_.top, 255);
+            firstFrame_ = false;
+            return;
+        }
+
+        const float seconds = elapsed * 0.001f;
+        const float drift = seconds * 0.05f;
+        const int rows = std::max(1, (h + cellH - 1) / cellH);
+        const Color white = Rgb(255, 255, 255);
+        const uint32_t glyphCount = static_cast<uint32_t>(matrixGlyphs_);
+
+        auto drawColumn = [&](int index) {
+            const MatrixColumn& column = matrixColumns_[static_cast<size_t>(index)];
+            const float local = seconds - column.delay;
+            if (local <= 0.0f) {
+                return;
+            }
+            const float head = column.head + column.speed * local;
+            const int firstRow =
+                std::max(0, static_cast<int>(floorf(head - column.trail)) + 1);
+            const int lastRow = std::min(rows - 1, static_cast<int>(floorf(head)));
+            if (firstRow > lastRow) {
+                return;
+            }
+            const Color tint = g_glow.At(fmodf(column.hue + drift, 1.0f));
+            for (int row = firstRow; row <= lastRow; row++) {
+                const float age = head - static_cast<float>(row);
+                const float q = Clamp01(1.0f - age / column.trail);
+                // The head of a stream is a bright character that flickers to a
+                // new one several times a second; the trail behind it is the
+                // event colour, dimming as it falls away.
+                const uint32_t seed = MatrixHash(static_cast<uint32_t>(row),
+                                                 static_cast<uint32_t>(index));
+                uint32_t pick;
+                float alpha;
+                Color ink;
+                if (age < 1.1f) {
+                    pick = MatrixHash(seed, static_cast<uint32_t>(head * 2.5f)) %
+                           glyphCount;
+                    ink = Mix(tint, white, 0.72f);
+                    alpha = 0.95f;
+                } else {
+                    // Some cells stay dark, which is what turns a solid bar into
+                    // a stream of characters.
+                    if ((seed >> 24) < column.blank) {
+                        continue;
+                    }
+                    pick = seed % glyphCount;
+                    ink = Mix(tint, white, 0.12f + 0.30f * q);
+                    alpha = 0.82f * powf(q, 2.1f);
+                }
+                const float cover = alpha * gain;
+                if (cover <= 0.004f) {
+                    continue;
+                }
+
+                const int top = row * cellH;
+                const int bottom = std::min(h, top + cellH);
+                const int right = std::min(w, column.left + cellW);
+                for (int y = top; y < bottom; y++) {
+                    const uint32_t* source = matrixAtlas_.Row(y - top) + pick * cellW;
+                    uint32_t* target = surface_.Row(y);
+                    for (int x = column.left; x < right; x++) {
+                        const uint32_t coverage = source[x - column.left] >> 24;
+                        if (!coverage) {
+                            continue;
+                        }
+                        BlendOver(target[x],
+                                  PackPremultiplied(
+                                      ink, cover * static_cast<float>(coverage) / 255.0f));
+                    }
+                }
+            }
+        };
+
+        // One column per unit of work: they never touch each other's pixels.
+        workers_.ForRows(0, static_cast<int>(matrixColumns_.size()), drawColumn, true, 6);
+        window_.Present(surface_, monitor_.left, monitor_.top, 255);
+        firstFrame_ = false;
+    }
+
     // The bezel presses the whole desktop inward: a dark frame grows out of the
     // four edges and the screen, captured once before the window appears, is
     // scaled down to fit inside it. The depth stays small so the desktop reads as
@@ -2414,10 +2680,16 @@ private:
 
     // The frame holds a still picture of the desktop, so it lets go sooner than
     // the other effects instead of freezing the screen for the whole duration.
+    // The cascade is a burst too: it has run through by the time the columns
+    // have fallen past the bottom edge.
     double SpanMs() const {
-        return style_.effect == RippleEffect::Bezel
-                   ? std::min(style_.durationMs, 2200.0)
-                   : style_.durationMs;
+        if (style_.effect == RippleEffect::Bezel) {
+            return std::min(style_.durationMs, 2200.0);
+        }
+        if (style_.effect == RippleEffect::Matrix) {
+            return std::min(style_.durationMs, 1800.0);
+        }
+        return style_.durationMs;
     }
 
     void RenderBezel(double now) {
@@ -2827,6 +3099,13 @@ private:
     std::vector<float> circuitFalloff_;
     float circuitThickness_ = 1.2f;
     float circuitReach_ = 7.0f;
+    // Matrix code: the rasterised atlas of characters, the cell size it was cut
+    // at, and the columns falling through the grid.
+    Surface matrixAtlas_;
+    int matrixCellW_ = 0;
+    int matrixCellH_ = 0;
+    int matrixGlyphs_ = 0;
+    std::vector<MatrixColumn> matrixColumns_;
     int drawnFirst_ = 0;
     int drawnLast_ = 0;
     int drawnX0_ = 0;
