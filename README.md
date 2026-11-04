@@ -4,6 +4,8 @@ Charging Animation is a Windhawk mod for Windows. Plug the charger in or pull it
 
 Most Windhawk mods hook into another program. This one does not need a host: it starts its own copy of windhawk.exe, watches the power line from there and draws everything itself.
 
+[sample.webm](https://github.com/user-attachments/assets/600c0655-646e-4bf9-aa80-66d7bec91260)
+
 ## Requirements
 
 - Windows 10 or Windows 11.
