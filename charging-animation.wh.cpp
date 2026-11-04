@@ -28,11 +28,18 @@ that your choices don't use hide themselves, so the list stays short.
 `When plugged in` and `When unplugged` decide which events play anything at all. The rest of the section is
 shared by both, apart from the two colors and the unplug direction. The sounds have a section of their own.
 
-There are five looks. `Animation` picks the one you want.
+There are six looks. `Animation` picks the one you want.
 
 **Wave** is the default. It takes a picture of the desktop and bends it outward along an expanding ring,
 tinted with the event color. `Origin` moves where it starts, either one of nine spots on the screen under
 the pointer or `Cursor Position` to use the pointer itself.
+
+**Linear Wave** is the same refraction with a straight front instead of a ring. A pair of fronts leave
+`Origin` together and run along the line it sits on, one each way, so `Top` washes the screen downward,
+`Left` sweeps it left to right and a corner sends it across at an angle. With `Center` the two fronts part
+in the middle and run out to either side. The band of light rides them and `Motion` shapes the speed in the
+same way. `Reverse` on an unplug runs them back in, so the desktop drains toward the origin instead of
+being pushed away from it.
 
 **Edge Glow** never touches the desktop. A band of light swells out of the screen borders, and one bright
 spot travels around them while it's up, coming in from the border nearest `Origin`. Set the color to
@@ -175,6 +182,7 @@ and the card.
     $description: "Pick an animation to play."
     $options:
       - ripple: Wave (Refraction)
+      - linearwave: Linear Wave (Refraction)
       - edgeglow: Edge Glow (Neon Border)
       - bezel: Bezel (Screen Push)
       - circuit: Circuit Trace (PCB Glow)
@@ -231,15 +239,15 @@ and the card.
     #! $showIf: {UnpluggedColor: custom}
   - UnplugDirection: reverse
     $name: Unplug direction
-    $description: "Which way the unplug animation travels. Forwards plays it exactly like plugging in, moving out from the origin; Reverse starts at the screen edges and collapses back in toward it. Wave, Edge Glow, Circuit Trace and Matrix Code use this."
-    #! $showIf: {Animation: [ripple, edgeglow, circuit, matrix]}
+    $description: "Which way the unplug animation travels. Forwards plays it exactly like plugging in, moving out from the origin; Reverse starts at the screen edges and collapses back in toward it. Wave, Linear Wave, Edge Glow, Circuit Trace and Matrix Code use this."
+    #! $showIf: {Animation: [ripple, linearwave, edgeglow, circuit, matrix]}
     $options:
       - forwards: Forwards (Expand)
       - reverse: Reverse (Collapse)
   - Origin: bottom
     $name: Origin
-    $description: "Where the animation starts on the monitor under the cursor. Wave grows from here, Edge Glow brings its travelling highlight in along the border from here, and the cascade is released from here outward. Cursor Position follows the pointer itself."
-    #! $showIf: {Animation: [ripple, edgeglow, matrix]}
+    $description: "Where the animation starts on the monitor under the cursor. Wave grows from here, Linear Wave sends its two fronts out from here, Edge Glow brings its travelling highlight in along the border from here, and the cascade is released from here outward. Cursor Position follows the pointer itself."
+    #! $showIf: {Animation: [ripple, linearwave, edgeglow, matrix]}
     $options:
       - topleft: Top Left
       - top: Top
@@ -263,8 +271,8 @@ and the card.
     #! $max: 5000
   - Motion: smooth
     $name: Motion
-    $description: "How the animation speeds up and slows down. Wave and Edge Glow use this."
-    #! $showIf: {Animation: [ripple, edgeglow]}
+    $description: "How the animation speeds up and slows down. Wave, Linear Wave and Edge Glow use this."
+    #! $showIf: {Animation: [ripple, linearwave, edgeglow]}
     $options:
       - smooth: Smooth (Default)
       - linear: Linear
@@ -1489,12 +1497,14 @@ float RoundedRectSdf(float px, float py, const RoundedRect& rect) {
 }
 
 // The scene effects. The ripple refracts the captured desktop along an
-// expanding wave, the edge glow paints a neon band that hugs the border, the
-// bezel presses the whole desktop inward inside a flat frame, the circuit
+// expanding wave and the linear wave does the same along a straight front that
+// crosses the screen, the edge glow paints a neon band that hugs the border,
+// the bezel presses the whole desktop inward inside a flat frame, the circuit
 // trace wakes up a board's routing along the taskbar and in the corners, and
 // the matrix rains characters down the screen in columns.
 enum class RippleEffect {
     Ripple,
+    LinearWave,
     EdgeGlow,
     Bezel,
     Circuit,
@@ -1506,6 +1516,7 @@ RippleEffect ParseRippleEffect(std::wstring text) {
         c = towlower(c);
     }
     text = Trim(text);
+    if (text == L"linearwave") return RippleEffect::LinearWave;
     if (text == L"edgeglow") return RippleEffect::EdgeGlow;
     if (text == L"bezel") return RippleEffect::Bezel;
     if (text == L"circuit") return RippleEffect::Circuit;
@@ -1596,9 +1607,18 @@ public:
         }
         maxRadius_ = farthest + 100.0f * scale;
 
+        // The ring wave reads its reach off maxRadius_ as it goes. The linear
+        // one needs the line through the origin, and how far the screen runs
+        // along it, worked out up front; the monitor and the origin are both
+        // known by this point.
+        if (style_.effect == RippleEffect::LinearWave) {
+            BuildLinearProfile(w, h);
+        }
+
         // The overlay effects paint the screen themselves and never sample the
         // desktop, so they skip the capture thread and start straight away.
-        if (style_.effect != RippleEffect::Ripple) {
+        if (style_.effect != RippleEffect::Ripple &&
+            style_.effect != RippleEffect::LinearWave) {
             return LaunchOverlay();
         }
 
@@ -1785,6 +1805,9 @@ private:
         // same fade level into the desktop pixels it paints itself.
         UpdateDim(now);
         switch (style_.effect) {
+            case RippleEffect::LinearWave:
+                RenderLinearWave(now);
+                break;
             case RippleEffect::EdgeGlow:
                 RenderGlow(now);
                 break;
@@ -3290,6 +3313,348 @@ private:
         AdaptQuality(NowMs() - frameStart);
     }
 
+    // The same refraction the ring wave uses, laid out along a straight front.
+    // The fronts cross the whole monitor in the direction that leads from the
+    // origin toward the middle of the screen, so an origin along the bottom
+    // washes the desktop upward and one in a corner sends it across at an
+    // angle. An origin at the middle has no direction to give, so the fronts
+    // part there and run left and right.
+    void BuildLinearProfile(int w, int h) {
+        const float dirX = static_cast<float>(w) * 0.5f - center_.x;
+        const float dirY = static_cast<float>(h) * 0.5f - center_.y;
+        const float length = sqrtf(dirX * dirX + dirY * dirY);
+        // Anything within a couple of percent of the middle counts as the
+        // middle. The anchors are whole pixels, so a centre origin lands half a
+        // pixel off and would otherwise hand out a diagonal to follow.
+        if (length < std::max(4.0f, std::min(w, h) * 0.02f)) {
+            linearX_ = 1.0f;
+            linearY_ = 0.0f;
+        } else {
+            linearX_ = dirX / length;
+            linearY_ = dirY / length;
+        }
+        // How far the furthest corner sits from the origin along that line, so
+        // both fronts can leave the screen instead of stopping at the last one.
+        float reach = 0.0f;
+        for (const POINT corner : {POINT{0, 0}, POINT{w, 0}, POINT{0, h}, POINT{w, h}}) {
+            const float along =
+                (static_cast<float>(corner.x) - center_.x) * linearX_ +
+                (static_cast<float>(corner.y) - center_.y) * linearY_;
+            reach = std::max(reach, fabsf(along));
+        }
+        linearReach_ = reach + 100.0f * scale_;
+    }
+
+    void RenderLinearWave(double now) {
+        const double frameStart = NowMs();
+        const float t = static_cast<float>(
+            std::clamp((now - start_) / style_.durationMs, 0.0, 1.0));
+        const float elapsed = static_cast<float>(now - start_);
+        const int w = surface_.Width();
+        const int h = surface_.Height();
+        if (!capture_ || rows_.size() != static_cast<size_t>(h)) {
+            return;
+        }
+
+        const float travel = EaseTravel(style_.curve, t);
+        // Both fronts leave the origin together, one each way along the line, so
+        // the wave parts the picture at the origin instead of shoving it in from
+        // one edge. On an unplug they meet at the origin again.
+        const float front = (style_.reverse ? 1.0f - travel : travel) * linearReach_;
+        // The band opens up as the front crosses, the way the ring's widens as
+        // it grows away from the origin.
+        const float spread = style_.reverse ? 1.0f - travel : travel;
+        const float sigma = (40.0f + 38.0f * spread) * scale_;
+        const float in = Clamp01(elapsed / 180.0f);
+        const float outStart = style_.reverse ? 0.72f : 0.55f;
+        const float out = Clamp01((t - outStart) / (1.0f - outStart));
+        const float fadeIn = in * in * (3.0f - 2.0f * in);
+        const float fadeOut = 1.0f - out * out * (3.0f - 2.0f * out);
+        const float strength = style_.strength * scale_ * fadeIn * fadeOut;
+        const float alpha = fadeIn * fadeOut * style_.opacity;
+
+        uint32_t colors[64];
+        for (int i = 0; i < 64; i++) {
+            colors[i] = PackPremultiplied(g_glow.At(i / 64.0f + t * 0.2f), 1.0f);
+        }
+
+        // The cross section is a straight line's, so it is sampled by distance
+        // along the direction of travel instead of by radius.
+        const float reach = sigma * 3.8f;
+        const int offset = static_cast<int>(ceilf(reach * 4.0f));
+        wave_.resize(static_cast<size_t>(offset) * 2 + 2);
+        for (size_t i = 0; i < wave_.size(); i++) {
+            const RippleWave wave = EvaluateRippleWave(
+                (static_cast<int>(i) - offset) / 4.0f, sigma, strength);
+            RasterWave& entry = wave_[i];
+            entry.displacement = wave.displacement;
+            entry.opacity =
+                static_cast<uint32_t>(wave.opacity * alpha * 255.0f + 0.5f);
+            entry.lightAlpha =
+                static_cast<uint32_t>(wave.light * alpha * 255.0f + 0.5f);
+            entry.light = g_glow.rainbow
+                              ? 0
+                              : ScalePremultiplied(colors[0], entry.lightAlpha);
+        }
+
+        // The band holds everything whose distance from the origin along the
+        // line falls between `front - reach` and `front + reach`, on either
+        // side of it. Until the fronts are further out than the band is wide,
+        // the two halves are still joined across the origin.
+        const float outer = front + reach;
+        const float inner = std::max(0.0f, front - reach);
+        const float dirX = linearX_;
+        const float dirY = linearY_;
+        const float ox = center_.x;
+        const float oy = center_.y;
+        const bool level = fabsf(dirX) < 1.0e-4f;
+
+        // The run of one row whose projection falls between two values. A
+        // straight front always cuts a row in a single run.
+        auto solve = [&](float base, float from, float to, int* begin,
+                         int* end) -> bool {
+            if (level) {
+                if (base < from || base > to) {
+                    return false;
+                }
+                *begin = 0;
+                *end = w;
+                return true;
+            }
+            const float low =
+                std::min((from - base) / dirX, (to - base) / dirX) - 0.5f;
+            const float high =
+                std::max((from - base) / dirX, (to - base) / dirX) - 0.5f;
+            // A line that is almost vertical divides by almost nothing, so the
+            // ends are pulled back into range before they become ints.
+            const int first =
+                std::max(0, static_cast<int>(ceilf(std::max(-1.0f, low))));
+            const int last = std::min(
+                w, static_cast<int>(floorf(std::min(static_cast<float>(w), high))) + 1);
+            if (last <= first) {
+                return false;
+            }
+            *begin = first;
+            *end = last;
+            return true;
+        };
+
+        // Where a row's pixel centres land inside the band. Two fronts can put
+        // two runs on the same row, which is what the span pair is for.
+        auto bandOf = [&](int y, RowSpans* spans) {
+            *spans = RowSpans{};
+            const float base =
+                (static_cast<float>(y) + 0.5f - oy) * dirY - ox * dirX;
+            if (inner > 0.0f) {
+                solve(base, inner, outer, &spans->begin[0], &spans->end[0]);
+                solve(base, -outer, -inner, &spans->begin[1], &spans->end[1]);
+            } else {
+                solve(base, -outer, outer, &spans->begin[0], &spans->end[0]);
+            }
+        };
+
+        // The run a whole row is handled over: whichever of the two fronts'
+        // runs are there, joined up. Both empty gives an empty run back.
+        auto joinSpans = [&](const RowSpans& spans, int* begin, int* end) {
+            *begin = w;
+            *end = 0;
+            for (int i = 0; i < 2; i++) {
+                if (spans.end[i] > spans.begin[i]) {
+                    *begin = std::min(*begin, spans.begin[i]);
+                    *end = std::max(*end, spans.end[i]);
+                }
+            }
+        };
+
+        int firstY = h;
+        int lastY = 0;
+        int bandX0 = w;
+        int bandX1 = 0;
+        for (int y = 0; y < h; y++) {
+            RowSpans spans;
+            bandOf(y, &spans);
+            int begin = 0;
+            int end = 0;
+            joinSpans(spans, &begin, &end);
+            if (end <= begin) {
+                continue;
+            }
+            firstY = std::min(firstY, y);
+            lastY = y + 1;
+            bandX0 = std::min(bandX0, begin);
+            bandX1 = std::max(bandX1, end);
+        }
+        if (lastY <= firstY) {
+            firstY = 0;
+            bandX0 = 0;
+            bandX1 = 0;
+        }
+
+        // Rows the capture has not reached yet stay clear, so the front never
+        // pushes a picture that is still half black.
+        const int capturedTop = capture_->top.load(std::memory_order_acquire);
+        const int capturedBottom = capture_->bottom.load(std::memory_order_acquire);
+        const int margin = static_cast<int>(ceilf(9.0f * scale_)) + 2;
+        if (capturedTop > 0) {
+            firstY = std::max(firstY, capturedTop + margin);
+        }
+        if (capturedBottom < h) {
+            lastY = std::min(lastY, capturedBottom - margin);
+        }
+
+        // A front waiting on the capture is the same as no front at all, so the
+        // range collapses and only last frame's rows are cleared this time.
+        const bool drawing = firstY < lastY;
+        if (!drawing) {
+            firstY = 0;
+            lastY = 0;
+            bandX0 = 0;
+            bandX1 = 0;
+        }
+        const int step = step_;
+        int rowsFirst = firstY;
+        int rowsLast = lastY;
+        int changedX0 = bandX0;
+        int changedX1 = bandX1;
+        if (drawnFirst_ < drawnLast_) {
+            rowsFirst = drawing ? std::min(rowsFirst, drawnFirst_) : drawnFirst_;
+            rowsLast = drawing ? std::max(rowsLast, drawnLast_) : drawnLast_;
+            changedX0 = drawing ? std::min(changedX0, drawnX0_) : drawnX0_;
+            changedX1 = drawing ? std::max(changedX1, drawnX1_) : drawnX1_;
+        }
+        drawnFirst_ = drawing ? firstY / step * step : 0;
+        drawnLast_ = drawing ? std::min(h, (lastY + step - 1) / step * step) : 0;
+        drawnX0_ = bandX0;
+        drawnX1_ = bandX1;
+
+        const Surface& snapshotSurface = capture_->snapshot;
+        const OpaquePixels snapshot{snapshotSurface.Valid() ? snapshotSurface.Row(0) : nullptr,
+                                    snapshotSurface.Width(), snapshotSurface.Height(),
+                                    snapshotSurface.Stride()};
+        const RasterWave* waves = wave_.data();
+        const int waveCount = static_cast<int>(wave_.size());
+        const float edgeWidth = 24.0f * scale_;
+        const bool rainbow = g_glow.rainbow;
+        // The wave paints the captured desktop back itself, so the scrim behind
+        // is not enough: this picture carries the same dim, at the same fade.
+        const uint32_t dimKeep = DimKeep(style_.dim * dimLevel_);
+        // The gradient runs along the front, so its phase is the distance
+        // sideways from the origin rather than an angle around it.
+        const float phaseSpan = std::max(1.0f, w * fabsf(dirY) + h * fabsf(dirX));
+
+        auto shade = [&](int x, int y) -> uint32_t {
+            const float px = static_cast<float>(x) + 0.5f;
+            const float py = static_cast<float>(y) + 0.5f;
+            const float along = (px - ox) * dirX + (py - oy) * dirY;
+            const int index =
+                static_cast<int>((fabsf(along) - front) * 4.0f) + offset;
+            if (index < 0 || index >= waveCount) {
+                return 0;
+            }
+            const RasterWave& wave = waves[index];
+            uint32_t pixel = 0;
+            if (snapshot.pixels && wave.opacity > 1) {
+                float edge = Clamp01(std::min(y, h - 1 - y) / edgeWidth);
+                if (x < edgeWidth || w - 1 - x < edgeWidth) {
+                    edge = std::min(edge, Clamp01(std::min(x, w - 1 - x) / edgeWidth));
+                }
+                edge = edge * edge * (3.0f - 2.0f * edge);
+                // Each half of the picture is pushed along its own front, away
+                // from the origin plane.
+                const float side = along < 0.0f ? -1.0f : 1.0f;
+                const float push = wave.displacement * edge * side;
+                pixel = SampleOpaquePixels(snapshot, static_cast<float>(x) + dirX * push,
+                                           static_cast<float>(y) + dirY * push);
+                if (dimKeep < 255) {
+                    pixel = DimPixel(pixel, dimKeep);
+                }
+                if (wave.opacity < 255) {
+                    pixel = ScalePremultiplied(pixel, wave.opacity);
+                }
+            }
+            if (wave.lightAlpha) {
+                uint32_t light = wave.light;
+                if (rainbow) {
+                    float phase = ((px - ox) * -dirY + (py - oy) * dirX) / phaseSpan;
+                    phase += t * 0.2f;
+                    phase -= floorf(phase);
+                    light = ScalePremultiplied(
+                        colors[static_cast<int>(phase * 64.0f) & 63], wave.lightAlpha);
+                }
+                BlendOver(pixel, light);
+            }
+            return pixel;
+        };
+
+        auto renderBlock = [&](int block) {
+            const int y0 = block * step;
+            const int y1 = std::min(h, y0 + step);
+            RowSpans spans[4];
+            int leaderBegin = w;
+            int leaderEnd = 0;
+            int leader = -1;
+            for (int y = y0; y < y1; y++) {
+                ClearRow(y);
+                if (y < firstY || y >= lastY) {
+                    continue;
+                }
+                RowSpans& row = spans[y - y0];
+                bandOf(y, &row);
+                int begin = 0;
+                int end = 0;
+                joinSpans(row, &begin, &end);
+                if (end <= begin) {
+                    continue;
+                }
+                leaderBegin = std::min(leaderBegin, begin);
+                leaderEnd = std::max(leaderEnd, end);
+                if (leader < 0) {
+                    leader = y;
+                }
+            }
+            if (leader < 0) {
+                return;
+            }
+            // One row inside the band is shaded for the whole block and the
+            // rest copy it, which is how the ring wave keeps its cost down too.
+            uint32_t* leaderRow = surface_.Row(leader);
+            for (int x = leaderBegin; x < leaderEnd; x++) {
+                const uint32_t pixel = shade(x, leader);
+                if (pixel) {
+                    leaderRow[x] = pixel;
+                }
+            }
+            for (int y = y0; y < y1; y++) {
+                if (y == leader) {
+                    continue;
+                }
+                uint32_t* row = surface_.Row(y);
+                for (int i = 0; i < 2; i++) {
+                    const int begin = spans[y - y0].begin[i];
+                    const int end = spans[y - y0].end[i];
+                    if (end > begin) {
+                        memcpy(row + begin, leaderRow + begin,
+                               static_cast<size_t>(end - begin) * sizeof(uint32_t));
+                    }
+                }
+                rows_[y] = spans[y - y0];
+            }
+            rows_[leader] = spans[leader - y0];
+        };
+
+        workers_.ForRows(rowsFirst / step, (rowsLast + step - 1) / step, renderBlock,
+                         static_cast<uint64_t>(w) * h >= 500000, std::max(1, 16 / step));
+        const RECT changed{changedX0, rowsFirst / step * step, changedX1,
+                           std::min(h, (rowsLast + step - 1) / step * step)};
+        if (firstFrame_) {
+            window_.Present(surface_, monitor_.left, monitor_.top, 255);
+            firstFrame_ = false;
+        } else if (changed.right > changed.left && changed.bottom > changed.top) {
+            window_.Present(surface_, monitor_.left, monitor_.top, 255, &changed);
+        }
+        AdaptQuality(NowMs() - frameStart);
+    }
+
     LayeredWindow window_;
     Surface surface_;
     // The scrim that darkens the screen behind the effect, and how far it is
@@ -3301,6 +3666,11 @@ private:
     Vec2 center_{};
     float scale_ = 1.0f;
     float maxRadius_ = 0;
+    // Linear wave: the unit direction its fronts travel in and how far the
+    // screen reaches either side of the origin along it.
+    float linearX_ = 1.0f;
+    float linearY_ = 0.0f;
+    float linearReach_ = 0.0f;
     double start_ = 0;
     bool active_ = false;
     std::vector<RasterWave> wave_;
