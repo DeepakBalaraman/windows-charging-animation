@@ -4510,7 +4510,9 @@ private:
 
         const bool showDetail = !detail.empty();
         const bool showBar = stats.percent >= 0;
-        const int pad = std::max(10, static_cast<int>(18.0f * s + 0.5f));
+        // A little roomier than the Fluent card: the Galaxy slab reads better
+        // with air around the badge, the number and the bar.
+        const int pad = std::max(13, static_cast<int>(22.0f * s + 0.5f));
         const int gap = std::max(6, static_cast<int>(13.0f * s + 0.5f));
         const int lineGap = std::max(1, static_cast<int>(4.0f * s + 0.5f));
         const int barH = std::max(3, static_cast<int>(4.0f * s + 0.5f));
