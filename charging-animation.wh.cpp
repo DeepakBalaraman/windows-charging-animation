@@ -165,6 +165,10 @@ give it, so it ignores this one. Turning `Details` off drops the status line, an
 
 While a full-screen app, a game or presentation mode is running, Quiet mode skips the animation, the sound
 and the card.
+
+### Credits
+
+Wave Effect inspired by [Magic Pointer Mod](https://windhawk.net/mods/magic-pointer)
 */
 // ==/WindhawkModReadme==
 
