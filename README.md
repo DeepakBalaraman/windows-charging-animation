@@ -101,7 +101,7 @@ A value with no backslash and no colon in it is read as a system alias, anything
 | --- | --- | --- |
 | When plugged in | On or off | On |
 | When unplugged | On or off | On |
-| Style | The five cards below | Fluent |
+| Style | The six cards below | Fluent |
 | Position | `Follow Effect Origin`, the corners, the edges, `Center` or `Cursor Position` | Follow Effect Origin |
 | Accent color | Match Effect Color, Custom, a named color, or Windows Accent Color | Match Effect Color |
 | Custom accent color | Any format from the color table | `#4285F4` |
@@ -114,11 +114,13 @@ A value with no backslash and no colon in it is read as a system alias, anything
 
 `Details` adds the status line under the number. On a charge it reads something like `Charging · 1h 20m to full · 65 W`, and on battery `On Battery · 3h 10m left`. The time and the wattage only appear when the battery reports a rate for them, so a machine that cannot measure one shows the status on its own.
 
-The five styles:
+The six styles:
 
 **Fluent (Windows 11-ish)** is the default. The desktop behind it is blurred once when the card appears and covered with the theme color, with a thin border and a soft shadow. A battery icon sits in a tinted tile next to the percentage, the status line goes underneath, and a level bar fills from empty as the card slides in and turns red below 20% while on battery.
 
 **Fluent (Minimal)** is the same card at badge size, with half the padding, a smaller number, no status line and a thinner bar.
+
+**Fluent (Tiny)** is that badge with the battery taken from the Segoe Fluent Icons font, the same icon the taskbar uses, so it steps through the system's own battery glyphs instead of a drawn one. It sits on its own without the tinted tile, and the bar stays. The font comes with Windows 11; Windows 10 has Segoe MDL2 Assets with the same glyphs, and if neither is installed the drawn battery is used.
 
 **PineApple (Card)** is the plain system HUD: a rounded square, as wide as it is tall, black in dark mode and white in light mode, with a large battery icon on top, the percentage below it, the status line under that and a capsule bar along the bottom. The accent color is not used in it, and the icon and the bar turn red when the battery runs low. It fades and pops in instead of sliding, and `Center` is the usual place to put it.
 
@@ -126,7 +128,7 @@ The five styles:
 
 **PineApple (Circle)** is the phone charging screen: a thick ring that fills clockwise to the battery level, a bolt and the percentage in the middle, and the status line on a frosted pill underneath. The middle of the dial is a soft patch of the blurred desktop, so the number sits on a little frost instead of bare wallpaper, and the patch fades away before it reaches the ring. The number and the bolt carry a soft shadow that keeps them readable on a bright background.
 
-The Fluent and Galaxy cards follow the Windows app theme, and the PineApple card flips between black and white with it. All five refresh once a second while they are up.
+The Fluent and Galaxy cards follow the Windows app theme, and the PineApple card flips between black and white with it. All six refresh once a second while they are up.
 
 ### Colors
 

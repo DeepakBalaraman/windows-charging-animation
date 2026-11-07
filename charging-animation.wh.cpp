@@ -134,6 +134,12 @@ level bar that fills from empty as the card slides in and turns red below 20% wh
 **Fluent (Minimal)** is the same card at badge size, with half the padding, a smaller number, no status
 line and a thinner bar.
 
+**Fluent (Tiny)** is that badge with the battery taken from the Segoe Fluent Icons font, the same icon
+the taskbar uses, so the level comes from the system's own battery glyphs instead of a drawn one. It
+sits on its own without the tinted tile, and the bar stays. The font ships with Windows 11; Windows 10
+has Segoe MDL2 Assets, which carries the same glyphs, and if neither is there the drawn battery is
+used instead.
+
 **PineApple (Card)** is the plain system HUD: a rounded square, as wide as it is tall, black in dark mode
 and white in light mode, with a large battery icon on top, the percentage below it, the status line under that
 and a full-width capsule bar along the bottom. The accent color isn't used anywhere in it, and the icon and
@@ -154,7 +160,7 @@ them readable on a bright background. It springs in with a small overshoot, swee
 shrinks away when it closes.
 
 The Fluent and Galaxy cards follow the Windows app theme; the PineApple card flips between black and
-white with it, so it stays readable on either wallpaper. All five update once a second and fade out at the
+white with it, so it stays readable on either wallpaper. All six update once a second and fade out at the
 end.
 
 **Position, accent and the rest.** `Position` is where the card appears: `Follow Effect Origin` keeps it
@@ -316,10 +322,11 @@ Power notification handling adapted from [Charging Sound](https://windhawk.net/m
     $description: "Show the panel with the battery level and charging status when the charger is disconnected."
   - Style: fluent
     $name: Style
-    $description: "Fluent is the Windows 11 acrylic card, Fluent Minimal the badge-sized version, PineApple (Card) a plain black or white HUD slab, Galaxy UI a wide soft card with a bolt badge beside the percentage, and PineApple (Circle) the phone charging ring with a caption pill."
+    $description: "Fluent is the Windows 11 acrylic card, Fluent Minimal the badge-sized version, Fluent Tiny the same badge with the battery taken from the Segoe Fluent Icons font, PineApple (Card) a plain black or white HUD slab, Galaxy UI a wide soft card with a bolt badge beside the percentage, and PineApple (Circle) the phone charging ring with a caption pill."
     $options:
       - fluent: Fluent (Windows 11-ish)
       - minimal: Fluent (Minimal)
+      - icons: Fluent (Tiny)
       - osd: PineApple (Card)
       - galaxy: Galaxy UI
       - pineapple: PineApple (Circle)
@@ -855,6 +862,49 @@ bool IsWindows11() {
                 (info.dwMajorVersion == 10 && info.dwBuildNumber >= 22000));
     }();
     return windows11;
+}
+
+// GDI quietly substitutes another family when a face is missing, so the face it
+// reports for the font is the only way to tell whether the font is installed.
+bool FontFaceInstalled(PCWSTR face) {
+    HDC dc = CreateCompatibleDC(nullptr);
+    if (!dc) {
+        return false;
+    }
+    LOGFONTW logFont{};
+    logFont.lfHeight = -16;
+    logFont.lfWeight = FW_NORMAL;
+    logFont.lfCharSet = DEFAULT_CHARSET;
+    lstrcpynW(logFont.lfFaceName, face, LF_FACESIZE);
+    bool installed = false;
+    HFONT font = CreateFontIndirectW(&logFont);
+    if (font) {
+        HGDIOBJ previous = SelectObject(dc, font);
+        wchar_t actual[LF_FACESIZE]{};
+        if (GetTextFaceW(dc, LF_FACESIZE, actual) > 0) {
+            installed = _wcsicmp(actual, face) == 0;
+        }
+        SelectObject(dc, previous);
+        DeleteObject(font);
+    }
+    DeleteDC(dc);
+    return installed;
+}
+
+// Segoe Fluent Icons is the Windows 11 icon font and Segoe MDL2 Assets is the
+// Windows 10 one. They share the battery range E850 to E862, so either will do
+// and the hand drawn glyph is the last resort.
+const wchar_t* CardIconFace() {
+    static const wchar_t* face = []() -> const wchar_t* {
+        if (FontFaceInstalled(L"Segoe Fluent Icons")) {
+            return L"Segoe Fluent Icons";
+        }
+        if (FontFaceInstalled(L"Segoe MDL2 Assets")) {
+            return L"Segoe MDL2 Assets";
+        }
+        return nullptr;
+    }();
+    return face;
 }
 
 void SetDwmAttribute(HWND hwnd, DWORD attribute, const void* value, DWORD size) {
@@ -4868,6 +4918,9 @@ private:
         if (hud_) {
             return RefreshPineAppleDesktop(stats, title, detail);
         }
+        if (KeyIs(style_.theme, L"icons")) {
+            return RefreshFluentTiny(stats, title);
+        }
         return RefreshFluent(stats, title, detail, KeyIs(style_.theme, L"minimal"));
     }
 
@@ -5088,6 +5141,216 @@ private:
 
         DeleteObject(titleFont);
         DeleteObject(detailFont);
+
+        return PlaceOnScreen(width, height);
+    }
+
+    static HFONT MakeIconFont(const wchar_t* face, int px) {
+        return CreateFontW(-px, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE, DEFAULT_CHARSET,
+                           OUT_TT_PRECIS, CLIP_DEFAULT_PRECIS, ANTIALIASED_QUALITY,
+                           DEFAULT_PITCH | FF_DONTCARE, face);
+    }
+
+    // The battery glyph for the current level. The charging range stops at 90%,
+    // and Battery10 lives on its own legacy code, so both ends are special cases.
+    static wchar_t CardBatteryGlyph(const ChargingStats& stats) {
+        if (stats.percent < 0) {
+            return static_cast<wchar_t>(0xE83F);  // Battery10, no reading to show.
+        }
+        const int level = std::clamp((stats.percent + 5) / 10, 0, 10);
+        if (stats.onAc) {
+            return static_cast<wchar_t>(0xE85A + std::min(level, 8));
+        }
+        return level >= 10 ? static_cast<wchar_t>(0xE83F)
+                           : static_cast<wchar_t>(0xE850 + level);
+    }
+
+    // Fluent (Tiny): the minimal badge, with the battery drawn from the Segoe
+    // Fluent Icons font instead of by hand, so it is the icon the system itself
+    // uses. It sits bare, without the tinted tile, and keeps the level bar.
+    bool RefreshFluentTiny(const ChargingStats& stats, const std::wstring& title) {
+        const float s = scale_;
+        const int basePx = std::clamp(style_.fontPx, 8, 64);
+        const int titlePx = std::max(12, static_cast<int>(basePx * 1.05f * s + 0.5f));
+        const wchar_t* face = CardIconFace();
+        const wchar_t glyphChar = CardBatteryGlyph(stats);
+
+        HFONT titleFont = CreateFontW(
+            -titlePx, 0, 0, 0, FW_SEMIBOLD, FALSE, FALSE, FALSE, DEFAULT_CHARSET,
+            OUT_TT_PRECIS, CLIP_DEFAULT_PRECIS, ANTIALIASED_QUALITY,
+            DEFAULT_PITCH | FF_DONTCARE,
+            IsWindows11() ? L"Segoe UI Variable Display" : L"Segoe UI");
+        if (!titleFont) {
+            return false;
+        }
+
+        const int pad = std::max(5, static_cast<int>(10.0f * s + 0.5f));
+        const int iconBox = std::max(16, static_cast<int>(26.0f * s + 0.5f));
+        const int gap = std::max(5, static_cast<int>(9.0f * s + 0.5f));
+        const int barH = std::max(2, static_cast<int>(2.5f * s + 0.5f));
+        const int barGap = std::max(3, static_cast<int>(6.0f * s + 0.5f));
+        const int minTextW = std::max(34, static_cast<int>(56.0f * s + 0.5f));
+        const bool showBar = stats.percent >= 0;
+
+        SIZE titleSize{};
+        SIZE ink{};
+        HFONT iconFont = face ? MakeIconFont(face, iconBox) : nullptr;
+        HDC measure = CreateCompatibleDC(nullptr);
+        if (measure) {
+            HGDIOBJ previous = SelectObject(measure, titleFont);
+            GetTextExtentPoint32W(measure, title.c_str(), static_cast<int>(title.size()),
+                                  &titleSize);
+            // The ink sits inside a much larger em box, so the font is measured
+            // and resized once instead of guessed at from the box it goes in.
+            if (iconFont) {
+                SelectObject(measure, iconFont);
+                GetTextExtentPoint32W(measure, &glyphChar, 1, &ink);
+                if (ink.cx > 0 && ink.cy > 0) {
+                    const float fitX =
+                        static_cast<float>(iconBox) / static_cast<float>(ink.cx);
+                    const float fitY =
+                        static_cast<float>(iconBox) / static_cast<float>(ink.cy);
+                    const int fitted = std::max(
+                        8, static_cast<int>(iconBox * std::min(fitX, fitY) + 0.5f));
+                    if (fitted != iconBox) {
+                        HFONT resized = MakeIconFont(face, fitted);
+                        if (resized) {
+                            SelectObject(measure, resized);
+                            DeleteObject(iconFont);
+                            iconFont = resized;
+                            GetTextExtentPoint32W(measure, &glyphChar, 1, &ink);
+                        }
+                    }
+                }
+            }
+            SelectObject(measure, previous);
+            DeleteDC(measure);
+        }
+
+        const int textW = std::max(static_cast<int>(titleSize.cx),
+                                   showBar ? minTextW : 0);
+        int textH = static_cast<int>(titleSize.cy);
+        if (showBar) {
+            textH += barGap + barH;
+        }
+
+        const int cardW = pad * 2 + iconBox + gap + textW;
+        const int cardH = pad * 2 + std::max(textH, iconBox);
+        if (cardW <= 0 || cardH <= 0 || cardW > 4000 || cardH > 2000) {
+            if (iconFont) {
+                DeleteObject(iconFont);
+            }
+            DeleteObject(titleFont);
+            return false;
+        }
+
+        // Same soft shadow and glass as the other Fluent cards, at badge size.
+        const float sigma = 6.0f * s;
+        const int shadow = static_cast<int>(ceilf(sigma * 3.0f));
+        const int width = cardW + shadow * 2;
+        const int height = cardH + shadow * 2;
+        if (!surface_.Resize(width, height) || !mask_.Resize(width, height)) {
+            if (iconFont) {
+                DeleteObject(iconFont);
+            }
+            DeleteObject(titleFont);
+            return false;
+        }
+
+        const Color accent =
+            ResolveOverlayAccent(style_.color, style_.customColor);
+        const GlowPalette gradient = MakeRainbowPalette();
+        const GlowPalette* sweep = style_.rainbow ? &gradient : nullptr;
+        const OverlayTheme theme = MakeOverlayTheme();
+        const RoundedRect card = MakeRect(static_cast<float>(shadow),
+                                          static_cast<float>(shadow),
+                                          static_cast<float>(shadow + cardW),
+                                          static_cast<float>(shadow + cardH),
+                                          std::max(5.0f, 6.0f * s));
+        surface_.Clear();
+        CastShadow(surface_, card, sigma, 4.0f * s, theme.shadowAlpha);
+
+        const float hairline = std::max(1.0f, s);
+        StrokeRounded(surface_, card, hairline, theme.hairline, theme.hairlineTop,
+                      theme.hairline, theme.hairlineBottom);
+        const RoundedRect panel =
+            MakeRect(card.x0 + hairline, card.y0 + hairline, card.x1 - hairline,
+                     card.y1 - hairline, std::max(5.0f, card.radius - hairline));
+        FillGlass(surface_, panel, backdrop_, theme.panelTop,
+                  theme.panelAlpha * 0.86f, accent, theme.tintTop);
+        FillRounded(surface_, panel, Mix(theme.panelTop, accent, theme.tintTop), 0.34f,
+                    Mix(theme.panelBottom, accent, theme.tintBottom), 0.34f, 0.012f);
+
+        HDC dc = mask_.Dc();
+        SetBkMode(dc, TRANSPARENT);
+        SetTextColor(dc, RGB(255, 255, 255));
+
+        if (iconFont) {
+            // Drawn into the mask first, so the glyph picks up the same theme
+            // colour and antialiasing as the text next to it.
+            mask_.Clear();
+            const float iconX =
+                static_cast<float>(shadow + pad) + (iconBox - ink.cx) * 0.5f;
+            const float iconY =
+                static_cast<float>(shadow) + (cardH - ink.cy) * 0.5f;
+            HGDIOBJ previous = SelectObject(dc, iconFont);
+            TextOutW(dc, static_cast<int>(iconX + 0.5f),
+                     static_cast<int>(iconY + 0.5f), &glyphChar, 1);
+            GdiFlush();
+            SelectObject(dc, previous);
+            CompositeText(theme.title);
+        } else {
+            // No icon font on this machine, so the hand drawn glyph stands in.
+            const float glyphW = static_cast<float>(iconBox) * 0.68f;
+            const float glyphH = static_cast<float>(iconBox) * 0.34f;
+            DrawBatteryGlyph(surface_,
+                             static_cast<float>(shadow + pad) + (iconBox - glyphW) * 0.5f,
+                             static_cast<float>(shadow) + (cardH - glyphH) * 0.5f,
+                             glyphW, glyphH, stats.percent, theme.title, 0.96f);
+        }
+
+        const int textLeft = shadow + pad + iconBox + gap;
+        const int textTop = shadow + (cardH - textH) / 2;
+        mask_.Clear();
+        HGDIOBJ previous = SelectObject(dc, titleFont);
+        TextOutW(dc, textLeft, textTop, title.c_str(), static_cast<int>(title.size()));
+        GdiFlush();
+        SelectObject(dc, previous);
+        CompositeText(theme.title);
+
+        if (showBar) {
+            const int barTop = textTop + static_cast<int>(titleSize.cy) + barGap;
+            const float barRight = static_cast<float>(textLeft + textW);
+            FillRounded(surface_,
+                        MakeRect(static_cast<float>(textLeft), static_cast<float>(barTop),
+                                 barRight, static_cast<float>(barTop + barH), barH * 0.5f),
+                        theme.track, 0.13f, theme.track, 0.09f, 0.0f);
+            Color bar = theme.light ? Mix(accent, Rgb(16, 16, 18), 0.14f) : accent;
+            const GlowPalette* barSweep = sweep;
+            if (!stats.onAc && stats.percent <= 20) {
+                bar = Mix(Rgb(232, 84, 66), accent, 0.2f);
+                barSweep = nullptr;
+            }
+            barReady_ = true;
+            barX_ = static_cast<float>(textLeft);
+            barY_ = static_cast<float>(barTop);
+            barW_ = static_cast<float>(textW);
+            barH_ = static_cast<float>(barH);
+            barLevel_ = Clamp01(stats.percent / 100.0f);
+            barTopColor_ = theme.light ? bar : Mix(bar, Rgb(255, 255, 255), 0.15f);
+            barColor_ = bar;
+            barSweep_ = barSweep != nullptr;
+        }
+
+        if (barReady_) {
+            base_.CopyFrom(surface_);
+            RenderBarFill(BarProgress(NowMs()));
+        }
+
+        if (iconFont) {
+            DeleteObject(iconFont);
+        }
+        DeleteObject(titleFont);
 
         return PlaceOnScreen(width, height);
     }
